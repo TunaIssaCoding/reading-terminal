@@ -1,0 +1,148 @@
+# Reading Terminal — implementation report
+
+## Delivered
+
+All application files are in `site/`, with no build step or runtime framework:
+
+- `index.html`, `styles.css`: dark-default three-column workspace, light theme, collapsible 21% library, default 30%-of-viewport notes pane, pointer/keyboard resizing, mobile drawers, accessible labels/focus states, settings and shortcut dialogs. Closed mobile drawers and the covered reader are inert to keyboard focus.
+- `js/reader.js`: measured source-line layout; interlinear notes beginning under the highlight's first letter; continued gap-by-gap wrapping, including beyond the passage and source end; locally expanding gaps; selection via `h`, floating Highlight and custom context menu; Copy/Search actions; Shift-right-click escape; click-to-edit, Esc, empty Backspace, delete control; quote/context/paragraph anchoring; native highlighted-passage dragging and a Send alternative.
+- `js/library.js`: counted Unread/Read/Commented accordions, required status/summary-length ordering, star-before-title controls, starred/tag filters, title/tag/author/body search, metadata and status menus.
+- `js/notes.js`: autosaved long notes, divider, live read-only reading-order margin notes, read-only bot summary and Connections; internal links open library articles. Drops anywhere in the notes pane append a block quote after one empty line.
+- `js/store.js`: private GitHub Contents API access; configurable owner/repo/branch/token; device-local token storage; namespaced IndexedDB cache and durable queue; two-second debounce and lifecycle flushing; synchronous recovery journal; bounded SHA-conflict retries; per-highlight timestamp merging and deletion tombstones; preservation of both concurrent long-note versions; per-field state merging; protection against edits made during an in-flight PUT; authenticated asset blobs; backup export/import; explicit partial-backup warnings. PUT paths are restricted to app-owned `user/*` files.
+- `js/markdown.js`: escaped basic markdown with safe URL handling and local article links. Private image paths do not first request files from the public site.
+- `js/demo.js`: three substantial, explicitly fictional articles, sample notes and linked bot summaries. No token is required.
+- `sw.js`: caches only public application code for offline startup; private API data remains outside Cache Storage.
+- `DESIGN.md`: written before application code, then updated to reflect verified integration details.
+- `README.md`: GitHub Pages/local hosting, private `reading-data` setup, restricted fine-grained token instructions, data schemas, interaction guide, sync/conflict behavior and backup/security notes.
+
+## Verification actually run
+
+### JavaScript syntax
+
+Final `node --check` runs passed for all eight JavaScript files:
+
+```text
+sw.js
+js/app.js
+js/demo.js
+js/library.js
+js/markdown.js
+js/notes.js
+js/reader.js
+js/store.js
+```
+
+Each final check ran from `site/` through:
+
+```sh
+flock /workspace/reviews/box-test.lock nice -n 19 ionice -c3 node --check <file>
+```
+
+### Actual headless Chromium application
+
+Served the real files using `python3 -m http.server`, and launched headless Google Chrome under the requested `flock`/`nice`/`ionice` wrapper. Used browser keyboard/mouse events, DOM geometry checks and visual screenshots—not a DOM-only substitute.
+
+Observed:
+
+- Native mouse selection displayed the floating action; `h` immediately focused the interlinear editor.
+- Typed a 1,326-character margin note. It occupied **12 line gaps**, its first fragment was **0 pixels** from the highlighted first letter horizontally, and geometry checks found **no intersection with source-line boxes**. This was checked again after the final reader changes.
+- The highlight, complete margin text and long-note quote survived reload.
+- Native dragging displayed the active drop target and appended the exact passage with `\n\n> ` separation. Drops onto both the editor and the pane header succeeded.
+- Floating-button and right-click-menu highlighting both created focused editable notes. Click-to-edit updated the margin collection. Empty Backspace retained the highlight; the delete control removed both the highlight and its collected note. Shift-right-click was not intercepted.
+- Star toggles did not open other articles. Starred-only and tag filtering worked. Searching a phrase present only in an unopened article body found that article.
+- Exercised `/`, `j`, Enter, `r`, `s`, `n`, `?`, and Esc; typing in the search editor did not invoke reading shortcuts.
+- Manual status override, read toggling, promotion to commented and automatic read marking near the body end worked.
+- At a 1,440-pixel viewport, the default notes pane measured **432 pixels**. Keyboard resize changed it to 31%; highlights and notes remained anchored after reflow.
+- Dark and light themes were visually inspected. Settings opened, the token input was masked, and the no-token connection test returned demo-mode guidance.
+- At a 390-pixel viewport, both mobile drawers opened, the notes drawer settled at approximately **358.8 pixels**, and the document had no horizontal overflow. Closed drawers rejected focus; opening notes isolated the background; Esc restored the reader.
+- With the HTTP origin server **stopped**, an uncached request failed, but reloading still displayed the app, **99 source lines**, and the saved margin note through the service-worker shell and IndexedDB. The server was restored afterward.
+- A 501-item browser fixture rendered all rows in approximately **19 ms** in this run. Unread/Read timestamps and Commented bot-length precedence produced the expected first rows; body-only filtering selected the expected item. This is a single local measurement, not a network or cross-device benchmark.
+
+Visual evidence retained outside the deployable site:
+
+- `../out/desktop.png`
+- `../out/mobile-notes.png`
+
+### Real modules exercised with deterministic API/data fixtures
+
+No real GitHub credentials were supplied or used. The actual store and UI ran against controlled browser-side GitHub responses.
+
+Verified:
+
+- Private-repository connection acceptance and public-repository refusal.
+- A simulated **409** caused a SHA re-fetch/retry and retained both concurrent long-note versions.
+- Text entered while a PUT was pending survived completion of that earlier PUT and reached the simulated remote.
+- Highlight-id last-write-wins, later deletion tombstones, unchanged-side three-way merges, and repeated conflict merging without duplicate text.
+- Independent remote star/local status changes merged.
+- Failed offline writes remained queued; a new store instance recovered them; reconnect drained the queue even when an earlier failed cache read was still settling.
+- The optional highlight start offset survived normalization. Resolved offsets preserved same-paragraph reading order after an edit.
+- A repository-relative SVG asset fetched through the authenticated API became a decodable **16 × 12** blob image.
+- Export included an uncached orphan note file and excluded the token. Import preserved local and imported long-note text. Offline export explicitly reported incomplete remote coverage.
+- In a private-mode UI fixture, source and notes refreshed before a deliberately delayed bot-summary request. The final visible reader, textarea and summary all contained the newer remote values rather than stale cached values.
+- Escaped raw HTML and rejected script URL schemes; recognized internal article links; avoided public-host requests for private asset paths.
+- Source soft breaks, mixed inline code fonts and code hard breaks produced correct single-line source boxes. Quotes re-anchored after paragraph insertion. A long note used **28 additional end-of-source gaps**. Unmatched passages remained visible in warnings. Text before/after an inline image remained highlightable while the image was preserved.
+
+## Failures found and corrected
+
+- A failed background offline read could poison the first reconnect flush. Flush now waits for outstanding user-file reconciliation before taking its write snapshot.
+- Normalization discarded stored highlight offsets. Offsets are preserved and resolved positions are supplied to the margin collection.
+- Soft markdown newlines and inline code font changes produced incorrect source-line splitting. Whitespace normalization and line-height-based detection corrected both.
+- Only the inner notes content accepted drops. The entire notes pane now accepts them.
+- Image-containing paragraphs had unhighlightable adjacent text. The reader separates those text runs into source paragraphs without losing the image.
+- Remote refresh events arriving while another article file was loading could be replaced by an older return value. Opening now keeps the newer reconciled values.
+- Partial backups were insufficiently explicit in Settings. Their filename, JSON and user-visible result now identify incomplete remote coverage.
+
+## Known limits and unverified environments
+
+- **No live private GitHub round trip was performed.** Token permission enforcement, organization approval/SSO policies, actual GitHub rate limits and a real GitHub Pages deployment still require an authorized repository/device. The API behavior above was verified with deterministic fixtures, not represented as live-service evidence.
+- Chromium desktop and mobile viewport behavior was exercised. **Native Safari, iOS/iPadOS selection, touch dragging and IME composition were not device-tested.** Touch/keyboard users have explicit Send-to-notes controls instead of depending on native HTML drag support.
+- Interlinear notes are one stored string rendered through per-gap textareas. Native mouse text selection is local to a fragment; arrow navigation and typing/paste continue through the canonical note. This is not a single contiguous native multi-line selection surface.
+- The markdown renderer intentionally implements basic markdown, not all CommonMark/GFM extensions. Raw HTML is escaped; tables and footnotes are not implemented or required by the supplied spec.
+- Unopened private articles cannot be read offline until fetched. A complete backup requires successful remote enumeration; a partial cached backup remains explicitly available when offline.
+- Browser/network emulation did not remain offline across reload in this harness. Offline startup was therefore proved by stopping the origin server, rather than claiming success from the unreliable emulation alone.
+
+At v1 delivery, no permanent test harness or temporary fixture scripts were added to the deployable site. Browser tabs and verification services were stopped after checking the app. The disposable browser profile was removed; only the two screenshots remained as runtime artifacts.
+
+## FIX1
+
+Implemented all nine numbered fixes from `../review/REVIEW.md`. Changes are confined to `site/`; no real reading data, credentials, bot changes, deployments or pushes were involved.
+
+### Fixes
+
+1. **B1 — selected-text dragging:** reader event handlers normalize Text targets to their parent Element before calling `closest`. Highlighted text explicitly permits text selection, overriding Chromium's draggable-element selection default. The permanent regression covers native selection → native Text-node drag → quote appended to long notes, plus dispatched Text-node pointer/click/drag events.
+2. **B2 — history:** user article opens push history; initial restoration replaces the entry. `popstate` and `hashchange` restore without pushing duplicate entries. Navigation smoke also exposed body-link markup being lost when splitting source lines; preserving inline ancestry keeps those links navigable.
+3. **B3 — PDFs:** `pdf_path` names a file in the private repo, fetched through the Contents API and cached as an `application/pdf` blob. The header opens its object URL in a new tab. Absolute `pdf_url` remains supported and takes precedence. Missing PDFs show an unavailable label.
+4. **B4 — images:** articles with no body image render `images[]` as a thumbnail strip under the summary. Private paths use authenticated blob loading. Body `assets/` paths resolve from the repo root, while relative paths such as `../assets/images/file.png` resolve from the article directory. No private asset is requested from the public site.
+5. **B5 — open-only writes:** the first auto-open does not mutate state. Subsequent `last_opened_at` values stay in memory until included with a real status/star edit; opening and browsing alone never enqueue a write. Notes/state edits retain the existing two-second debounce and lifecycle flush.
+6. **B6 — body search:** optional `search-index.json` supplies slug-to-text entries, fetched once per connection session and cached in IndexedDB. Missing, malformed and unavailable indexes degrade to cached entries or lazy body fetching; missing/non-string entries fall back per article. Full bodies remain separate from index excerpts, so an index cannot replace reader content.
+7. **B7 — status reversal:** automatic Commented promotion stores `commented_from`; clearing all long/margin note text restores the previous unread/read status. Manual Commented remains intact, including when chosen during an automatic promotion. Provenance survives reload/backup and merges atomically with status.
+8. **B8 — growing notes:** long notes grow/shrink on input, article load, quote append and width/font changes. The textarea has no inner scrollbar or resize handle; the notes pane scrolls.
+9. **B9 — presentation:** generated titles are italic in both list and reader. Compact density defaults to a one-line title plus tags/byline, with a persisted Comfortable toggle. Added SVG favicon plus ICO fallback and updated the public shell cache. Demo auto-open remains idle rather than reporting a save.
+
+`README.md` documents the PDF/image/search-index schemas and updated interactions; `DESIGN.md` records the changed contracts. `tests/smoke.py` contains only fictional fixtures and uses no real GitHub token.
+
+### Verification actually run
+
+- **Syntax:** `node --check <file>` passed for all seven `js/*.js` files and `sw.js`; the final reader change was checked again.
+- **Full headless smoke:** `python3 tests/smoke.py http://127.0.0.1:8765` passed against the served site with Google Chrome and mocked GitHub Contents API responses:
+
+  ```text
+  PASS navigation_media_layout
+  PASS search index: full
+  PASS search index: absent
+  PASS search index: malformed
+  PASS search index: partial
+  PASS indexed_search
+  PASS debounce_status_and_growth
+  Native selected-highlight drag targets: nodeType 3, trusted true
+  PASS highlight_drag_and_persistence
+  PASS keyboard_stars_and_read
+  PASS mobile_and_demo
+  PASS store_conflict_export_import
+  PASS all fictional headless reading-terminal regressions
+  ```
+
+- The suite verified PDF new tabs and decoded image blobs, external `pdf_url`, no public private-asset requests, Back/Forward/internal links, zero initial/open-only PUTs, body-only search without article fan-out when indexed, fallback search, debounce timing, unread/read restoration versus manual Commented across reload, textarea growth/shrink, native and dispatched selected-text drops, live margins without source overlap, highlight deletion/empty-note retention, persistence, sorting/stars/keyboard/read threshold, mobile drawers, favicon responses, private-only writes, 409 retries, independent star merging, atomic status provenance, export/import and refusal of a public data repo. No uncaught page exceptions were observed in the successful run.
+- **Visual/direct browser checks:** dark and light desktop surfaces and mobile notes were inspected. Desktop widths at 1440 × 900 were **302.39 / 705.61 / 432 px**; compact rows were **56.44 px**, with **10 fully visible rows** in the 24-item fixture. At 390 × 844, notes measured **358.80 px**, the covered reader was inert and document width stayed **390 px**. A 45-line editor grew to **1111 px** and shrank to **235 px** after native deletion. Floating-button and custom-context-menu highlights focused their editors and updated margin notes; no page errors.
+
+The live-GitHub, Safari/iOS and touch/IME limits above still apply. Bot-side asset copying and optional index generation remain the data producer's responsibility; this pass changes only the app.
