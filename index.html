@@ -5,13 +5,64 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: blob: data:; connect-src 'self' https://api.github.com; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: blob: data:; connect-src 'self' https://api.github.com blob:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>Reading Terminal</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="icon" type="image/x-icon" href="favicon.ico">
   <link rel="stylesheet" href="styles.css">
   <script type="module" src="js/app.js"></script>
 </head>
-<body>
+<body class="auth-blocked">
+  <section id="lock-screen" class="auth-screen" aria-labelledby="lock-title">
+    <div class="auth-card">
+      <p class="section-eyebrow">YOUR PRIVATE READING ROOM</p>
+      <h1 id="lock-title">Reading terminal</h1>
+      <p>Locked. Unlock to open your library.</p>
+      <button id="unlock-passkey" class="primary" hidden>Unlock with passkey</button>
+      <form id="unlock-form">
+        <label for="unlock-password">Password</label>
+        <input id="unlock-password" type="password" autocomplete="current-password" required>
+        <label class="check-label"><input id="unlock-remember" type="checkbox" checked>Remember this device</label>
+        <p class="field-help">Only on a trusted device. Anyone using this browser profile can open your remembered library.</p>
+        <button id="unlock-submit" type="submit" class="primary" disabled>Unlock</button>
+      </form>
+      <p id="unlock-error" role="alert"></p>
+      <button id="unlock-retry" hidden>Retry loading vault</button>
+      <p><a href="#demo" data-demo>Explore the demo library</a></p>
+      <a href="#setup" class="field-help">Set up or replace a vault</a>
+    </div>
+  </section>
+  <section id="setup-screen" class="auth-screen" aria-labelledby="setup-title" hidden>
+    <div class="auth-card">
+      <p class="section-eyebrow">A KEY TO YOUR LIBRARY</p>
+      <h1 id="setup-title">Reading terminal</h1>
+      <p>Set a password backup, then add a passkey in Settings for everyday unlocking.</p>
+      <form id="setup-form">
+        <label for="setup-token">GitHub access token</label>
+        <input id="setup-token" type="password" autocomplete="off" spellcheck="false" required>
+        <p class="field-help">Fine-grained token with Contents read and write on reading-data and reading-terminal. It is encrypted in this browser and never sent anywhere except GitHub.</p>
+        <label for="setup-password">New password</label>
+        <input id="setup-password" type="password" autocomplete="new-password" minlength="12" required aria-describedby="setup-strength">
+        <p id="setup-strength" class="field-help" aria-live="polite">Use 4 or 5 random words.</p>
+        <label for="setup-confirm">Confirm password</label>
+        <input id="setup-confirm" type="password" autocomplete="new-password" minlength="12" required>
+        <details><summary>Repositories</summary>
+          <label for="setup-owner">GitHub owner</label><input id="setup-owner" value="TunaIssaCoding" required autocomplete="off">
+          <label for="setup-repo">Private repository</label><input id="setup-repo" value="reading-data" required autocomplete="off">
+          <label for="setup-branch">Data branch</label><input id="setup-branch" value="main" required autocomplete="off">
+          <label for="setup-site-repo">Site repository</label><input id="setup-site-repo" value="reading-terminal" required autocomplete="off">
+          <label for="setup-site-branch">Site branch</label><input id="setup-site-branch" value="main" required autocomplete="off">
+        </details>
+        <label class="check-label"><input id="setup-remember" type="checkbox" checked>Remember this device</label>
+        <label class="check-label"><input id="setup-replace" type="checkbox">Replace the existing vault</label>
+        <p class="field-help">Replacement is irreversible: existing passkeys will stop working. Other remembered devices will lock when they see the new vault. You do not need the old password to replace it.</p>
+        <button id="setup-submit" class="primary" type="submit">Create vault and unlock</button>
+      </form>
+      <p id="setup-status" role="status"></p>
+      <p id="setup-error" role="alert"></p>
+      <p><a href="#demo" data-demo>Explore the demo library</a> · <a href="#" id="setup-back">Back to unlock</a></p>
+    </div>
+  </section>
   <header class="topbar">
     <button id="library-toggle" class="icon-button" aria-label="Toggle library" aria-controls="sidebar" aria-expanded="true">☰</button>
     <a class="wordmark" href="#">reading<span>terminal</span><span class="cursor-mark" aria-hidden="true">_</span></a>
@@ -20,6 +71,7 @@
     <span id="sync-status" role="status" aria-live="polite">Opening local library…</span>
     <button id="theme-toggle" class="icon-button" aria-label="Switch to light theme" title="Toggle theme">◐</button>
     <button id="help-open" class="icon-button" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">?</button>
+    <button id="lock-button" class="text-button" hidden>Lock</button>
     <button id="settings-open" class="text-button">Settings</button>
     <button id="notes-toggle" class="text-button" aria-controls="notes-pane" aria-expanded="false">Notes</button>
   </header>
@@ -49,19 +101,40 @@
   <div id="selection-menu" class="context-menu" role="menu" aria-label="Selection actions" hidden><button role="menuitem" data-action="highlight">Highlight <kbd>h</kbd></button><button role="menuitem" data-action="copy">Copy</button><button role="menuitem" data-action="search">Search web ↗</button></div>
   <div id="toast" role="status" aria-live="polite" hidden></div>
   <dialog id="settings-dialog" aria-labelledby="settings-title">
-    <form id="settings-form">
-      <header class="dialog-header"><div><span class="section-eyebrow">YOUR DATA, YOUR REPOSITORY</span><h2 id="settings-title">Connection & settings</h2></div><button type="button" data-close aria-label="Close settings">×</button></header>
-      <p>Reading data stays in your private GitHub repository. This site only writes to <code>user/</code>. With no token, a separate fictional demo library is used.</p>
-      <div class="form-grid"><label>GitHub owner<input name="owner" autocomplete="off" placeholder="TunaIssaCoding" value="TunaIssaCoding"></label><label>Private repository<input name="repo" required value="reading-data" autocomplete="off"></label></div>
-      <label>Branch<input name="branch" required value="main" autocomplete="off"></label>
-      <label>Fine-grained access token<input name="token" type="password" autocomplete="off" spellcheck="false" placeholder="github_pat_…"></label>
-      <p class="field-help">Select only your private <strong>reading-data</strong> repository and grant Contents: read and write. The token is stored in this browser's localStorage. Use a trusted device; exports never contain it.</p>
-      <div class="dialog-actions"><button id="test-connection" type="button">Test connection</button><button type="submit" class="primary">Save & connect</button></div>
+    <header class="dialog-header"><div><span class="section-eyebrow">YOUR DATA, YOUR REPOSITORY</span><h2 id="settings-title">Connection & settings</h2></div><button type="button" data-close aria-label="Close settings">×</button></header>
+    <section id="security-section" hidden>
+      <h3>Security</h3>
+      <p>Use a passkey as your primary key; keep your password as backup.</p>
+      <label for="passkey-label">Passkey label (optional)</label><input id="passkey-label" maxlength="120">
+      <button id="add-passkey" type="button">Add passkey on this device</button>
+      <p class="field-help">Some platforms ask twice: once to create the passkey, then to enable its unlock secret.</p>
+      <ul id="passkey-list"></ul>
+      <details><summary>Change password</summary>
+        <form id="change-password">
+          <label for="current-password">Current password</label><input id="current-password" type="password" autocomplete="current-password" required>
+          <label for="new-password">New password</label><input id="new-password" type="password" autocomplete="new-password" minlength="12" required aria-describedby="password-strength">
+          <p id="password-strength" class="field-help" aria-live="polite">Use 4 or 5 random words.</p>
+          <label for="confirm-password">Confirm new password</label><input id="confirm-password" type="password" autocomplete="new-password" minlength="12" required>
+          <button id="change-password-submit" type="submit">Change password</button>
+        </form>
+      </details>
+      <p id="security-status" role="status"></p>
+    </section>
+    <details id="advanced-connection"><summary>Advanced: connect with a token</summary>
+      <form id="settings-form">
+        <p>Manual connections store a token on this device. Normal vault unlocking never does.</p>
+        <div class="form-grid"><label>GitHub owner<input name="owner" autocomplete="off" placeholder="TunaIssaCoding" value="TunaIssaCoding"></label><label>Private repository<input name="repo" required value="reading-data" autocomplete="off"></label></div>
+        <label>Branch<input name="branch" required value="main" autocomplete="off"></label>
+        <label>Fine-grained access token<input name="token" type="password" autocomplete="off" spellcheck="false" placeholder="Access token"></label>
+        <p class="field-help">Grant Contents read and write on the private data repository. This advanced token is stored in localStorage. Use a trusted device; exports never contain it.</p>
+        <div class="dialog-actions"><button id="test-connection" type="button">Test connection</button><button type="submit" class="primary">Save & connect</button></div>
+      </form>
+    </details>
       <p id="connection-result" role="status"></p>
       <hr><h3>Portable by design</h3><p>Export all user state and notes as JSON. Import merges with this library's existing notes; it never deletes them. Backups contain private text—store them securely.</p>
       <div class="dialog-actions"><button id="export-data" type="button">Export backup</button><label class="button-label">Import backup<input id="import-data" type="file" accept="application/json,.json" hidden></label></div>
       <p class="field-help">See <a href="README.md" target="_blank" rel="noopener">setup instructions</a> for the private repository layout.</p>
-    </form>
+    <p><a href="#setup" id="settings-setup">Set up or replace a vault</a></p>
   </dialog>
   <dialog id="help-dialog" aria-labelledby="help-title"><header class="dialog-header"><div><span class="section-eyebrow">LESS REACHING, MORE READING</span><h2 id="help-title">Keyboard shortcuts</h2></div><button data-close aria-label="Close shortcuts">×</button></header><dl class="shortcut-list"><dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>Next / previous library item</dd><dt><kbd>Enter</kbd></dt><dd>Open the focused item</dd><dt><kbd>r</kbd></dt><dd>Toggle read</dd><dt><kbd>s</kbd></dt><dd>Toggle star</dd><dt><kbd>h</kbd></dt><dd>Highlight selected source text</dd><dt><kbd>n</kbd></dt><dd>Focus long notes</dd><dt><kbd>/</kbd></dt><dd>Search the library</dd><dt><kbd>Esc</kbd></dt><dd>Close an editor, drawer or popover</dd><dt><kbd>?</kbd></dt><dd>Open this guide</dd></dl><p>Shortcuts stay out of your way while typing. Select text to write between its lines. Drag a highlighted passage onto the other page, or use its “↗” action. Shift + right-click keeps the browser menu.</p></dialog>
 </body>

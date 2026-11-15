@@ -1,10 +1,10 @@
 # Reading Terminal
 
-A static, local-first reading workspace. No build step, framework, backend, analytics, or third-party scripts. Open the hosted site without a token to explore three fictional demo articles. Demo edits persist on that device and never touch GitHub.
+A static, local-first reading workspace. No build step, framework, backend, analytics, or third-party scripts. Unlock your private library with a passkey, with your own password as backup. The lock/setup screens also offer **Explore the demo library**: three fictional articles whose edits stay on that device and never touch GitHub.
 
 ## Publish the app
 
-Publish the contents of `site/` to a public GitHub Pages repository (or any HTTPS static host). The app supports a Pages subdirectory: all code URLs are relative. The site repository contains app code and fictional demo fixtures only—never add your real articles, notes, backup exports, or token to it.
+Publish the contents of `site/` to a public GitHub Pages repository (or any HTTPS static host). The app supports a Pages subdirectory: all code URLs are relative. The public repository contains app code, fictional fixtures and, after browser setup, an **encrypted** `vault.json`. Never add real articles, notes, backup exports, plaintext passwords or tokens. There is no pre-created vault in this source tree.
 
 For local use, serve the directory rather than opening a `file://` URL:
 
@@ -20,11 +20,22 @@ Open `http://localhost:8000`. ES modules and service workers require HTTP(S). Af
 1. Create a **private** GitHub repository named **`reading-data`**. Initialize it with a commit and note the branch name (normally `main`). Owner, repository and branch are configurable.
 2. Populate the private repo with the layout below. Start with `library.json` containing `[]` if your bot has not imported articles yet.
 3. In GitHub, go to **Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token**.
-4. Select the appropriate resource owner. Under repository access, choose **Only select repositories → reading-data**. Grant **Repository permissions → Contents: Read and write**. Metadata read is automatically included. Do not grant access to the public app repository or other repositories. Choose an expiry appropriate to your usage.
-5. Open the site → **Settings**. Enter owner, repository and branch; paste the token. Click **Test connection**, then **Save & connect**. The app checks that the repository is private. A connection test checks access and configured data; a write is verified only by a subsequent actual sync.
-6. Repeat on other trusted devices. Tokens are stored only in that origin's browser `localStorage`, not embedded in URLs or included in backups. Clear the token and save to return to the separate demo cache.
+4. Select the appropriate resource owner. Under repository access, choose **Only select repositories → reading-data and reading-terminal**. Grant **Repository permissions → Contents: Read and write**. Metadata read is automatically included. Choose an expiry appropriate to your usage; do not grant unrelated repositories.
+5. Open the published site. With no vault, it displays setup. Enter the token, choose a password of at least 12 characters (**4–5 random words recommended**), and confirm it. Repository names/branches are configurable under **Repositories**. Choose **Create vault and unlock**. The private data repository is checked; the browser encrypts the token and commits only encrypted vault JSON to the site repository. The password is never transmitted; the token is sent only to GitHub in Authorization headers.
+6. This device unlocks immediately; GitHub Pages may take a minute to publish the vault for other devices. Open **Settings → Security → Add passkey on this device**. Face ID, Touch ID or the platform authenticator will prompt; some platforms need a second prompt to obtain the PRF unlock secret. If PRF is unsupported, use your password on that device—no unusable slot is saved.
+7. On another device, unlock with an available passkey or your password, then optionally add that device's passkey in Settings. Passkeys are tied to the site's hostname; changing hosts requires registering new ones. Normal use never needs token pasting.
 
-A token in browser storage is accessible to scripts running on the same origin. Use a dedicated, trusted Pages origin; protect your device and browser profile. Do not install untrusted scripts or paste a token into chat or source files. Removing the token does not erase the private IndexedDB cache; clear the site's browser storage when retiring a device. Cache data and exported backups are not encrypted by this app.
+**Remember this device** is on by default. It encrypts the session and DEK under a non-extractable device CryptoKey stored in IndexedDB, allowing silent unlock on the next visit, even offline. Use it only on a trusted browser profile. Turn it off to re-prompt after reload; credentials are then kept in memory, never sessionStorage. Same-origin scripts can use a stored CryptoKey despite its non-extractable flag.
+
+The top-bar **Lock** button gives pending sync up to 1.5 seconds, deletes the remembered session, clears the current library cache and screen, and revokes private asset URLs. **Unsynced edits survive** in the durable queue/recovery journal and sync after the next unlock. These pending edits and downloaded backups are not encrypted by the vault. Sync/export before clearing browser data or retiring a device.
+
+Settings → **Security** lists/removes passkeys and changes the password after verifying the current one. Changing the password keeps existing passkeys working. Passwords protect the public vault against offline guessing through PBKDF2 cost, not a server rate limit. Protect the device, browser profile, GitHub account and Pages origin; do not install untrusted scripts or paste credentials into chat/source files.
+
+Forgotten password and no usable passkey? Open **`./#setup`**, tick **Replace the existing vault**, and supply the token and a new password. No old password is needed, but existing passkeys stop working against the replacement; remembered devices lock after observing its new identity. To revoke a leaked token, **delete/revoke it on GitHub and re-run setup with a new token**. Removing a passkey or changing the password does not revoke a token already obtained from an older vault, which may remain in Git history.
+
+### Advanced manual connection
+
+Existing manual tokens continue to work when `vault.json` is absent. **Settings → Advanced: connect with a token** retains connection testing and Save & connect. This legacy path stores the token in localStorage and needs access only to the private data repository. A successful vault unlock removes the old saved token. Exports never contain credentials. Use setup for the normal cross-device password/passkey flow.
 
 ## Private repository layout
 
@@ -130,7 +141,7 @@ The bot owns `library.json`, `articles/*`, `assets/*`, optional `search-index.js
 | `Esc` | Close popovers/drawers or the interlinear editor |
 | `?` | Keyboard help |
 
-Reading shortcuts do not fire inside inputs, editors or settings. Shift + right-click retains the browser's native context menu. Dark mode is default; the top-bar theme button switches to light mode.
+Reading shortcuts do not fire inside inputs, editors, settings or the lock/setup screens. Shift + right-click retains the browser's native context menu. Dark mode is default; the top-bar theme button switches to light mode.
 
 ## Persistence, conflicts, and backups
 
@@ -149,7 +160,8 @@ Settings → **Export backup** downloads all available user state/notes, without
 The permanent headless smoke harness uses only fictional data and a mocked GitHub Contents API. With Python Playwright and `/usr/bin/google-chrome` installed, serve `site/` and run from the project root:
 
 ```sh
-python3 site/tests/smoke.py http://127.0.0.1:8000
+node --test site/tests/
+python3 site/tests/smoke.py http://localhost:8000
 ```
 
-The URL argument is optional (`READING_BASE_URL`, otherwise `http://127.0.0.1:8765`). The harness exercises the real browser UI and store, captures uncaught exceptions, and rejects unexpected network requests; no real token or repository is used. It does not generate result files.
+The URL argument is optional (`READING_BASE_URL`, otherwise `http://localhost:8765`). Use `localhost`, not `127.0.0.1`, so WebAuthn has a valid RP id. The harness exercises the real browser UI and store, including setup/unlock/remember/Lock, security conflicts and a CDP virtual authenticator configured with `hasPrf: true`, `ctap2_1`, and `internal`. Passkey registration, encrypted vault commit, Lock and PRF unlock must succeed; an unsupported fallback fails the scenario. This does not verify physical authenticators. The harness captures uncaught exceptions and rejects unexpected network requests; no real token or repository is used and no result files are generated. Crypto unit tests use Node 20+ WebCrypto; package metadata only selects ES modules and the directory test entrypoint, not a build step.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Headless behavioral regressions; all GitHub data below is fictional.
 
-Serve site/, then run: python3 site/tests/smoke.py [http://127.0.0.1:8765]
+Serve site/, then run: python3 site/tests/smoke.py [http://localhost:8765]
 READING_BASE_URL supplies the URL when the positional argument is omitted.
 Requires Python Playwright and /usr/bin/google-chrome; no browser install needed.
 No real repository, credentials, downloads, screenshots, or result files are used.
@@ -25,6 +25,9 @@ SETTINGS = {"owner": "fictional-reader", "repo": "fictional-library", "branch": 
 API_ROOT = "/repos/fictional-reader/fictional-library"
 NOTES = ".long-notes-editor"
 STAMP = "2026-01-01T00:00:00.000Z"
+PASSWORD = "Fictional orchard comet river 73!"
+NEW_PASSWORD = "Fictional lantern meadow orbit 94!"
+SITE_ROOT = "/repos/fictional-reader/fictional-site/contents/vault.json"
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=")
 
 
@@ -61,6 +64,12 @@ class Repository:
         self.conflicts = {}
         self.items = []
         self.files = {}
+        self.vault = None
+        self.vault_puts = []
+        self.vault_conflict = None
+        self.vault_conflict_status = 409
+        self.public_vault_error = False
+        self.fail_writes = False
         body_index = {}
         for number in range(1, 25):
             slug = f"essay-{number:02}"
@@ -121,6 +130,10 @@ class Repository:
         if request.headers.get("authorization") != f"Bearer {TOKEN}":
             self.violations.append("GitHub request missing fictional authorization")
             return route.fulfill(status=401, json={"message": "Unauthorized fictional request"})
+        if url.path == "/repos/fictional-reader/fictional-site":
+            return route.fulfill(json={"private": False, "permissions": {"push": True}})
+        if url.path == SITE_ROOT:
+            return self.route_vault(route, request)
         if url.path == API_ROOT:
             self.requests.append((request.method, "repository", time.monotonic()))
             return route.fulfill(json={"private": self.private, "permissions": {"push": True}})
@@ -131,6 +144,8 @@ class Repository:
         path = unquote(url.path[len(prefix):])
         self.requests.append((request.method, path, time.monotonic()))
         if request.method == "PUT":
+            if self.fail_writes:
+                return route.fulfill(status=503, json={"message": "Fictional offline write"})
             if not self.private or not re.fullmatch(r"user/(state\.json|notes/[^/]+\.json)", path):
                 self.violations.append("Unsafe PUT: " + path)
                 return route.fulfill(status=403, json={"message": "Unsafe write"})
@@ -157,9 +172,38 @@ class Repository:
         return route.fulfill(json={"type": "file", "encoding": "base64", "path": path,
                                    "content": base64.b64encode(content).decode(), "sha": hashlib.sha1(content).hexdigest()})
 
+    def route_vault(self, route, request):
+        content = json.dumps(self.vault).encode() if self.vault is not None else None
+        sha = hashlib.sha1(content).hexdigest() if content is not None else None
+        if request.method == "GET":
+            if content is None:
+                return route.fulfill(status=404, json={"message": "Not Found"})
+            return route.fulfill(json={"type": "file", "encoding": "base64", "path": "vault.json",
+                                       "sha": sha, "content": base64.b64encode(content).decode()})
+        if request.method != "PUT":
+            self.violations.append("Unexpected vault method: " + request.method)
+            return route.fulfill(status=405, json={"message": "Method not allowed"})
+        data = request.post_data_json
+        self.vault_puts.append(data)
+        if self.vault_conflict is not None:
+            self.vault = self.vault_conflict
+            self.vault_conflict = None
+            return route.fulfill(status=self.vault_conflict_status, json={"message": "Fictional concurrent vault edit"})
+        if data.get("sha") != sha:
+            return route.fulfill(status=409, json={"message": "SHA mismatch"})
+        decoded = base64.b64decode(data["content"]).decode()
+        assert data["message"] == "Update reading vault"
+        assert data.get("branch", "main") == "main"
+        assert TOKEN not in decoded and PASSWORD not in decoded and NEW_PASSWORD not in decoded
+        self.vault = json.loads(decoded)
+        assert self.vault["format"] == "reading-terminal-vault"
+        assert "token" not in self.vault and "dek" not in self.vault
+        return route.fulfill(json={"content": {"path": "vault.json",
+                                               "sha": hashlib.sha1(json.dumps(self.vault).encode()).hexdigest()}})
+
 
 @contextmanager
-def session(browser, base, repo=None, mobile=False, store_only=False, demo=False):
+def session(browser, base, repo=None, mobile=False, store_only=False, demo=False, vault=False):
     repo = repo or Repository()
     context = browser.new_context(viewport={"width": 390 if mobile else 1440, "height": 844 if mobile else 900},
                                   service_workers="block", reduced_motion="reduce")
@@ -173,6 +217,12 @@ def session(browser, base, repo=None, mobile=False, store_only=False, demo=False
         if url.hostname == "fiction.example" and url.path == "/external.pdf":
             return route.fulfill(content_type="text/html", body="<title>Fictional external PDF destination</title>")
         if (url.scheme, url.netloc) == (origin.scheme, origin.netloc):
+            if url.path.endswith("/vault.json"):
+                if repo.public_vault_error:
+                    return route.abort("internetdisconnected")
+                if repo.vault is None:
+                    return route.fulfill(status=404, json={"message": "No fictional vault"})
+                return route.fulfill(json=repo.vault, headers={"Cache-Control": "no-store"})
             if url.path.endswith("/__smoke_store__.html"):
                 return route.fulfill(content_type="text/html", body="<!doctype html><title>Isolated store smoke</title>")
             if "/assets/" in url.path:
@@ -183,15 +233,19 @@ def session(browser, base, repo=None, mobile=False, store_only=False, demo=False
         return route.abort()
 
     context.route("**/*", network)
-    if not demo:
+    if not demo and not vault:
         context.add_init_script(
             "if (location.origin === " + json.dumps(f"{origin.scheme}://{origin.netloc}") + ") "
             "localStorage.setItem('reading-terminal.settings', " + json.dumps(json.dumps(SETTINGS)) + ")")
     context.on("page", lambda page: page.on("pageerror", lambda error: errors.append(str(error))))
     page = context.new_page()
+    page.route("https://api.github.com/**", repo.route)
     page.set_default_timeout(12000)
-    page.goto(base + ("/__smoke_store__.html" if store_only else "/#article=essay-01" if not demo else "/"))
-    if not store_only:
+    page.goto(base + ("/__smoke_store__.html" if store_only else "/#article=essay-01" if not demo and not vault else "/"))
+    if demo:
+        expect(page.locator("#setup-screen")).to_be_visible()
+        page.locator("#setup-screen").get_by_role("link", name="Explore the demo library").click()
+    if not store_only and not vault:
         page.wait_for_selector(".source-line")
         expect(page.locator(NOTES)).to_be_enabled()
         page.evaluate("document.fonts.ready")
@@ -586,6 +640,14 @@ def mobile_and_demo(browser, base):
         page.wait_for_timeout(2500)
         assert "Saving" not in page.locator("#sync-status").inner_text()
         assert not repo.requests, "Demo mode contacted GitHub"
+        page.goto(base + "/#demo")
+        page.reload()
+        expect(page.locator(".library-item")).to_have_count(3)
+        expect(page.locator("#setup-screen")).not_to_be_visible()
+        expect(page.locator("#lock-screen")).not_to_be_visible()
+        expect(page.locator("#lock-button")).not_to_be_visible()
+        expect(page.locator(NOTES)).to_be_enabled()
+        assert not repo.requests, "Direct demo link contacted GitHub"
 
 
 def store_conflict_export_import(browser, base):
@@ -654,9 +716,383 @@ def store_conflict_export_import(browser, base):
         assert denied["flush"]["pending"] > 0 and repo.puts == [], denied
 
 
+def fill_setup(page, password=PASSWORD):
+    page.locator("#setup-token").fill(TOKEN)
+    page.locator("#setup-password").fill(password)
+    page.locator("#setup-confirm").fill(password)
+    details = page.locator("#setup-screen details")
+    if not details.evaluate("el => el.open"):
+        details.locator("summary").click()
+    for field, value in {"owner": "fictional-reader", "repo": "fictional-library", "branch": "main",
+                         "site-repo": "fictional-site", "site-branch": "main"}.items():
+        page.locator("#setup-" + field).fill(value)
+
+
+def vault_library(page):
+    expect(page.locator("#lock-screen")).not_to_be_visible()
+    expect(page.locator("#setup-screen")).not_to_be_visible()
+    expect(page.locator("#lock-button")).to_be_visible()
+    expect(page.locator("#lock-button")).to_be_enabled()
+    expect(page.locator('[data-library-id="essay-01"]')).to_have_count(1)
+    expect(page.locator(NOTES)).to_be_enabled()
+    page.wait_for_selector(".source-line")
+
+
+def unlock_password(page, password=PASSWORD, remember=True):
+    expect(page.locator("#lock-screen")).to_be_visible()
+    page.locator("#unlock-remember").set_checked(remember)
+    expect(page.locator("#unlock-submit")).to_be_enabled()
+    page.locator("#unlock-password").fill(password)
+    page.locator("#unlock-password").press("Enter")
+    vault_library(page)
+    expect(page.locator("#unlock-password")).to_have_value("")
+
+
+def no_browser_secrets(page):
+    storage = page.evaluate("JSON.stringify({local:{...localStorage},session:{...sessionStorage}})")
+    for secret in (TOKEN, PASSWORD, NEW_PASSWORD):
+        assert secret not in storage, "Vault secret persisted in Web Storage"
+
+
+def auth_mobile_layout(page, screen, fields):
+    expect(page.locator(screen)).to_be_visible()
+    assert page.viewport_size["width"] == 390
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), "Auth screen horizontal overflow"
+    for selector in fields:
+        control = page.locator(selector)
+        control.scroll_into_view_if_needed()
+        bounds = control.bounding_box()
+        assert bounds and 0 <= bounds["x"] and bounds["x"] + bounds["width"] <= 391, (selector, bounds)
+        assert bounds["height"] >= 24, (selector, bounds)
+
+
+def setup_unlock_remember_lock(browser, base):
+    with session(browser, base, vault=True, mobile=True) as (page, repo, _):
+        expect(page.locator("#setup-screen")).to_be_visible()
+        expect(page.locator("#setup-token")).to_have_attribute("type", "password")
+        expect(page.locator("#setup-remember")).to_be_checked()
+        auth_mobile_layout(page, "#setup-screen", ["#setup-token", "#setup-password", "#setup-confirm", "#setup-submit"])
+        fill_setup(page)
+        page.locator("#setup-password").fill("")
+        page.locator("#setup-password").press_sequentially("rjkns/?")
+        expect(page.locator("#help-dialog")).not_to_be_visible()
+        expect(page.locator("#setup-screen")).to_be_visible()
+        page.locator("#setup-password").fill(PASSWORD)
+        page.locator("#setup-confirm").fill(NEW_PASSWORD)
+        page.locator("#setup-submit").click()
+        expect(page.locator("#setup-submit")).to_be_enabled()
+        expect(page.locator("#setup-token")).to_have_value(TOKEN)
+        for selector in ("#setup-password", "#setup-confirm"):
+            expect(page.locator(selector)).to_have_value("")
+        assert not repo.vault_puts, "Mismatched passwords published a vault"
+        setup_endpoint = "https://api.github.com" + SITE_ROOT + "*"
+        for fail in (lambda route: route.abort("internetdisconnected"),
+                     lambda route: route.fulfill(status=403, json={"message": "Fictional permission denied"})):
+            page.route(setup_endpoint, fail)
+            page.locator("#setup-password").fill(PASSWORD)
+            page.locator("#setup-confirm").fill(PASSWORD)
+            page.locator("#setup-submit").click()
+            expect(page.locator("#setup-submit")).to_be_enabled()
+            expect(page.locator("#setup-token")).to_have_value(TOKEN)
+            for selector in ("#setup-password", "#setup-confirm"):
+                expect(page.locator(selector)).to_have_value("")
+            assert repo.vault is None and not repo.vault_puts, "Failed setup published a vault"
+            page.unroute(setup_endpoint, fail)
+        page.locator("#setup-password").fill(PASSWORD)
+        page.locator("#setup-confirm").fill(PASSWORD)
+        page.locator("#setup-submit").click()
+        vault_library(page)
+        assert len(repo.vault_puts) == 1
+        assert len(repo.vault["slots"]) == 1 and repo.vault["slots"][0]["type"] == "password"
+        assert repo.vault["slots"][0]["iterations"] >= 600000
+        for selector in ("#setup-token", "#setup-password", "#setup-confirm"):
+            expect(page.locator(selector)).to_have_value("")
+        no_browser_secrets(page)
+        remembered = page.evaluate("""async () => {
+          const db=await new Promise(resolve=>{const r=indexedDB.open('reading-terminal-session');r.onsuccess=()=>resolve(r.result)});
+          const record=await new Promise(resolve=>{const r=db.transaction('remembered').objectStore('remembered').get('device');r.onsuccess=()=>resolve(r.result)});
+          db.close();
+          let rejectsExport=false;try{await crypto.subtle.exportKey('raw',record.key)}catch{rejectsExport=true}
+          return {extractable:record.key.extractable,rejectsExport,fields:Object.keys(record),encrypted:record.ciphertext instanceof ArrayBuffer};
+        }""")
+        assert remembered["extractable"] is False and remembered["rejectsExport"] and remembered["encrypted"]
+        assert not {"token", "payload", "dek", "vault"}.intersection(remembered["fields"])
+        page.reload()
+        vault_library(page)
+        no_browser_secrets(page)
+        page.locator("#lock-button").click()
+        expect(page.locator("#lock-screen")).to_be_visible()
+        auth_mobile_layout(page, "#lock-screen", ["#unlock-password", "#unlock-submit"])
+        expect(page.locator("#unlock-passkey")).not_to_be_visible()
+        expect(page.locator("#unlock-password")).to_have_attribute("autocomplete", "current-password")
+        expect(page.locator("#unlock-error")).to_have_attribute("role", "alert")
+        page.reload()
+        expect(page.locator("#lock-screen")).to_be_visible()
+        page.locator("#unlock-password").fill("Wrong fictional password 123!")
+        page.locator("#unlock-submit").click()
+        expect(page.locator("#unlock-error")).to_have_text("That password did not unlock the library.")
+        expect(page.locator("#unlock-password")).to_have_value("")
+        expect(page.locator("#lock-screen")).to_be_visible()
+        unlock_password(page, remember=False)
+        no_browser_secrets(page)
+        page.reload()
+        expect(page.locator("#lock-screen")).to_be_visible()
+        unlock_password(page)
+        repo.fail_writes = True
+        page.set_viewport_size({"width": 1440, "height": 900})
+        page.wait_for_function("() => !document.querySelector('#notes-pane').inert")
+        page.locator(NOTES).fill("Fictional edit queued before Lock while GitHub is unavailable.")
+        expect(page.locator(NOTES)).to_have_value("Fictional edit queued before Lock while GitHub is unavailable.")
+        page.locator("#lock-button").click()
+        expect(page.locator("#lock-screen")).to_be_visible()
+        locked_cache = page.evaluate("""async () => {
+          const db=await new Promise(resolve=>{const r=indexedDB.open('reading-terminal-cache');r.onsuccess=()=>resolve(r.result)});
+          const read=name=>new Promise(resolve=>{const r=db.transaction(name).objectStore(name).getAll();r.onsuccess=()=>resolve(r.result)});
+          const cache=await read('cache'),queue=await read('queue');db.close();
+          return {cache:cache.map(r=>r.path),queue:queue.map(r=>r.path),reader:document.querySelector('#article-body').textContent};
+        }""")
+        assert locked_cache["cache"] == [] and locked_cache["reader"] == ""
+        assert "user/notes/essay-01.json" in locked_cache["queue"], locked_cache
+        no_browser_secrets(page)
+        page.reload()
+        expect(page.locator("#lock-screen")).to_be_visible()
+        repo.fail_writes = False
+        unlock_password(page)
+        expect(page.locator(NOTES)).to_have_value("Fictional edit queued before Lock while GitHub is unavailable.")
+        synced(page)
+        assert repo.document("user/notes/essay-01.json")["long_notes"] == (
+            "Fictional edit queued before Lock while GitHub is unavailable.")
+        repo.public_vault_error = True
+        page.reload()
+        vault_library(page)
+        page.locator("#lock-button").click()
+        expect(page.locator("#lock-screen")).to_be_visible()
+        page.reload()
+        expect(page.locator("#lock-screen")).to_be_visible()
+        expect(page.locator("#unlock-error")).not_to_be_empty()
+        expect(page.locator("#unlock-retry")).to_be_visible()
+        repo.public_vault_error = False
+        page.locator("#unlock-retry").click()
+        unlock_password(page)
+
+
+def seed_vault(page, repo, passkeys=False):
+    result = page.evaluate("""async ({payload,password,passkeys}) => {
+      const crypto = await import('./js/vault.js');
+      const made = await crypto.createVault(payload,password);
+      let vault=made.vault;
+      if(passkeys) vault=await crypto.addPasskeySlot(vault,made.dek,{
+        credentialId:crypto.toBase64Url(new Uint8Array(32).fill(11)),
+        prfSalt:new Uint8Array(32).fill(12), prfOutput:new Uint8Array(32).fill(13),
+        label:'Synthetic crypto fixture, not a hardware passkey'});
+      return vault;
+    }""", {"payload": {**SETTINGS, "site_repo": "fictional-site", "site_branch": "main"},
+           "password": PASSWORD, "passkeys": passkeys})
+    repo.vault = result
+    return result
+
+
+def setup_replacement_and_invalidation(browser, base):
+    with session(browser, base, vault=True, store_only=True) as (page, repo, _):
+        original = seed_vault(page, repo)
+        page.goto(base + "/")
+        unlock_password(page)
+        replacement = seed_vault(page, repo)
+        assert replacement["vault_id"] != original["vault_id"]
+        page.reload()
+        wait_until(page, lambda: page.evaluate("""async () => {
+          const {loadRemembered}=await import('./js/session.js'); return await loadRemembered() === null;
+        }"""), "Replacing the vault identity did not delete the remembered device record")
+        expect(page.locator("#lock-screen")).to_be_visible()
+        page.goto(base + "/#setup")
+        expect(page.locator("#setup-screen")).to_be_visible()
+        expect(page.locator("#setup-screen")).to_contain_text("existing passkeys will stop working")
+        expect(page.locator("#setup-replace")).not_to_be_checked()
+        fill_setup(page, NEW_PASSWORD)
+        page.locator("#setup-submit").click()
+        expect(page.locator("#setup-error")).not_to_be_empty()
+        assert not repo.vault_puts, "Setup overwrote an existing vault without explicit permission"
+        page.locator("#setup-replace").check()
+        fill_setup(page, NEW_PASSWORD)
+        page.locator("#setup-submit").click()
+        vault_library(page)
+        assert len(repo.vault_puts) == 1 and repo.vault_puts[0].get("sha")
+        assert repo.vault["vault_id"] != replacement["vault_id"]
+        page.locator("#lock-button").click()
+        unlock_password(page, NEW_PASSWORD)
+
+
+def security_password_remove_conflicts(browser, base):
+    with session(browser, base, vault=True, store_only=True) as (page, repo, _):
+        initial = seed_vault(page, repo, passkeys=True)
+        original_slot = next(slot for slot in initial["slots"] if slot["type"] == "passkey")
+        page.goto(base + "/")
+        unlock_password(page)
+        page.locator("#settings-open").click()
+        expect(page.locator("#security-section")).to_be_visible()
+        page.locator("#security-section summary").filter(has_text="Change password").click()
+
+        def change(current):
+            page.locator("#current-password").fill(current)
+            page.locator("#new-password").fill(NEW_PASSWORD)
+            page.locator("#confirm-password").fill(NEW_PASSWORD)
+            page.locator("#change-password-submit").click()
+
+        change("Wrong fictional password")
+        expect(page.locator("#security-status")).to_have_text("That password did not unlock the library.")
+        assert not repo.vault_puts
+        for selector in ("#current-password", "#new-password", "#confirm-password"):
+            expect(page.locator(selector)).to_have_value("")
+        page.locator("#current-password").fill(PASSWORD)
+        page.locator("#new-password").fill(NEW_PASSWORD)
+        page.locator("#confirm-password").fill(PASSWORD)
+        page.locator("#change-password-submit").click()
+        expect(page.locator("#change-password-submit")).to_be_enabled()
+        for selector in ("#current-password", "#new-password", "#confirm-password"):
+            expect(page.locator(selector)).to_have_value("")
+        assert not repo.vault_puts, "Mismatched passwords changed the vault"
+        # This is a crypto fixture, not a fabricated WebAuthn success.
+        concurrent = page.evaluate("""async ({vault,password}) => {
+          const c=await import('./js/vault.js'); const {dek}=await c.unlockWithPassword(vault,password);
+          return c.addPasskeySlot(vault,dek,{credentialId:c.toBase64Url(new Uint8Array(32).fill(21)),
+            prfSalt:new Uint8Array(32).fill(22),prfOutput:new Uint8Array(32).fill(23),
+            label:'Concurrent synthetic slot'});
+        }""", {"vault": initial, "password": PASSWORD})
+        repo.vault_conflict = concurrent
+        change(PASSWORD)
+        wait_until(page, lambda: len(repo.vault_puts) == 2 and repo.vault != concurrent,
+                   "Password change did not retry the 409 conflict")
+        expect(page.locator("#change-password-submit")).to_be_enabled()
+        for selector in ("#current-password", "#new-password", "#confirm-password"):
+            expect(page.locator(selector)).to_have_value("")
+        assert {s["id"] for s in repo.vault["slots"] if s["type"] == "passkey"} == {
+            s["id"] for s in concurrent["slots"] if s["type"] == "passkey"}
+        assert repo.vault["payload"] == initial["payload"], "Changing password re-encrypted the payload"
+        crypto_check = page.evaluate("""async ({vault,oldPassword,newPassword,slotId}) => {
+          const c=await import('./js/vault.js'); let oldRejected=false;
+          try {await c.unlockWithPassword(vault,oldPassword)} catch {oldRejected=true}
+          const fresh=await c.unlockWithPassword(vault,newPassword);
+          const prf=await c.unlockWithPrf(vault,slotId,new Uint8Array(32).fill(13));
+          return {oldRejected, token:fresh.payload.token, passkeyToken:prf.payload.token};
+        }""", {"vault": repo.vault, "oldPassword": PASSWORD, "newPassword": NEW_PASSWORD,
+               "slotId": original_slot["id"]})
+        assert crypto_check == {"oldRejected": True, "token": TOKEN, "passkeyToken": TOKEN}
+        remove = page.locator(f'#passkey-list button[data-slot-id="{original_slot["id"]}"]')
+        page.once("dialog", lambda dialog: dialog.dismiss())
+        remove.click()
+        assert len(repo.vault_puts) == 2, "Canceled removal committed a vault"
+        repo.vault_conflict_status = 422
+        repo.vault_conflict = json.loads(json.dumps(repo.vault))
+        repo.vault_conflict["updated_at"] = "2099-01-01T00:00:00.000Z"
+        page.once("dialog", lambda dialog: dialog.accept())
+        remove.click()
+        expect(remove).to_have_count(0)
+        assert len(repo.vault_puts) == 4, "Removal did not retry exactly once"
+        remaining = [s for s in repo.vault["slots"] if s["type"] == "passkey"]
+        assert len(remaining) == 1 and remaining[0]["id"] != original_slot["id"]
+        assert sum(s["type"] == "password" for s in repo.vault["slots"]) == 1
+        page.locator('#settings-dialog [data-close]').click()
+        no_browser_secrets(page)
+        page.reload()
+        vault_library(page)
+        page.locator("#settings-open").click()
+        expect(page.locator("#passkey-list button[data-slot-id]")).to_have_count(1)
+        expect(page.locator("#passkey-list")).to_contain_text(remaining[0]["label"])
+        page.locator('#settings-dialog [data-close]').click()
+        page.locator("#lock-button").click()
+        unlock_password(page, NEW_PASSWORD)
+
+
+def lock_during_search(browser, base):
+    with session(browser, base, vault=True, store_only=True) as (page, repo, _):
+        seed_vault(page, repo)
+        page.goto(base + "/")
+        unlock_password(page)
+        pending = []
+        page.route("**/contents/search-index.json*", lambda route: pending.append(route))
+        page.locator("#search").fill("orchard")
+        wait_until(page, lambda: bool(pending), "Search did not start before Lock")
+        page.locator("#lock-button").click()
+        expect(page.locator("#lock-screen")).to_be_visible()
+        for route in pending:
+            route.abort()
+        page.unroute("**/contents/search-index.json*")
+        unlock_password(page)
+
+
+def replacement_during_security_work(browser, base):
+    with session(browser, base, vault=True, store_only=True) as (page, repo, _):
+        seed_vault(page, repo)
+        page.goto(base + "/")
+        unlock_password(page)
+        replacement = seed_vault(page, repo)
+        pending = []
+        page.route("**/vault.json*", lambda route: pending.append(route))
+        page.reload()
+        vault_library(page)
+        wait_until(page, lambda: bool(pending), "Background vault check did not start")
+        # Delay the real KDF, rather than substituting a fake password result.
+        page.evaluate("""() => {
+          const derive=crypto.subtle.deriveKey.bind(crypto.subtle);
+          window.restoreKdf=()=>{crypto.subtle.deriveKey=derive};
+          crypto.subtle.deriveKey=async(...args)=>{
+            await new Promise(resolve=>window.releaseKdf=resolve);
+            return derive(...args);
+          };
+        }""")
+        page.locator("#settings-open").click()
+        page.locator("#security-section summary").click()
+        page.locator("#current-password").fill(PASSWORD)
+        page.locator("#new-password").fill(NEW_PASSWORD)
+        page.locator("#confirm-password").fill(NEW_PASSWORD)
+        page.locator("#change-password-submit").click()
+        page.wait_for_function("() => typeof window.releaseKdf === 'function'")
+        pending.pop().fulfill(json=replacement)
+        expect(page.locator("#lock-screen")).to_be_visible()
+        expect(page.locator("#settings-dialog")).not_to_be_visible()
+        assert page.evaluate("async () => (await (await import('./js/session.js')).loadRemembered()) === null")
+        page.evaluate("window.restoreKdf(); window.releaseKdf()")
+        page.unroute("**/vault.json*")
+        unlock_password(page)
+        assert repo.vault["vault_id"] == replacement["vault_id"] and not repo.vault_puts
+
+
+def cdp_passkey_unlock(browser, base):
+    with session(browser, base, vault=True, store_only=True) as (page, repo, _):
+        seed_vault(page, repo)
+        page.goto(base + "/")
+        unlock_password(page)
+        cdp = page.context.new_cdp_session(page)
+        authenticator = None
+        try:
+            cdp.send("WebAuthn.enable")
+            authenticator = cdp.send("WebAuthn.addVirtualAuthenticator", {"options": {
+                "protocol": "ctap2", "ctap2Version": "ctap2_1", "transport": "internal",
+                "hasResidentKey": True, "hasUserVerification": True, "isUserVerified": True,
+                "hasPrf": True, "automaticPresenceSimulation": True}})["authenticatorId"]
+            page.locator("#settings-open").click()
+            page.locator("#passkey-label").fill("Fictional CDP authenticator")
+            page.locator("#add-passkey").click()
+            expect(page.locator("#security-status")).to_contain_text("Security updated.", timeout=30000)
+            assert len(repo.vault_puts) == 1, "Passkey registration did not commit the vault"
+            assert sum(slot["type"] == "passkey" for slot in repo.vault["slots"]) == 1
+            expect(page.locator("#passkey-list")).to_contain_text("Fictional CDP authenticator")
+            page.locator('#settings-dialog [data-close]').click()
+            page.locator("#lock-button").click()
+            expect(page.locator("#unlock-passkey")).to_be_visible()
+            page.locator("#unlock-passkey").click()
+            vault_library(page)
+            no_browser_secrets(page)
+            print("PASS CDP virtual authenticator PRF add and unlock (not physical hardware)", flush=True)
+        finally:
+            if authenticator:
+                cdp.send("WebAuthn.removeVirtualAuthenticator", {"authenticatorId": authenticator})
+            cdp.detach()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("base_url", nargs="?", default=os.environ.get("READING_BASE_URL", "http://127.0.0.1:8765"))
+    parser.add_argument("base_url", nargs="?", default=os.environ.get("READING_BASE_URL", "http://localhost:8765"))
     args = parser.parse_args()
     base = args.base_url.rstrip("/")
     expect.set_options(timeout=12000)
@@ -665,7 +1101,9 @@ def main():
         try:
             for scenario in (navigation_media_layout, indexed_search, debounce_status_and_growth,
                              highlight_drag_and_persistence, keyboard_stars_and_read,
-                             mobile_and_demo, store_conflict_export_import):
+                             mobile_and_demo, store_conflict_export_import, setup_unlock_remember_lock,
+                             setup_replacement_and_invalidation, security_password_remove_conflicts,
+                             lock_during_search, replacement_during_security_work, cdp_passkey_unlock):
                 scenario(browser, base)
                 print("PASS", scenario.__name__, flush=True)
         finally:

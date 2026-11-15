@@ -2,6 +2,7 @@ import { ReadingStore, getSettings, saveSettings } from './store.js';
 import { Library } from './library.js';
 import { NotesPane } from './notes.js';
 import { Reader } from './reader.js';
+import { VaultAccess } from './auth.js';
 
 const $ = selector => document.querySelector(selector);
 const now = () => new Date().toISOString();
@@ -174,9 +175,8 @@ async function openArticle(id, navigation = 'push') {
   }
 }
 
-async function connect() {
+async function connect(settings = getSettings()) {
   const version = ++connectionVersion; ++openVersion; ++searchVersion;
-  const settings = getSettings();
   store?.dispose();
   store = new ReadingStore(settings); const currentStore = store;
   libraryItems = []; state = {}; active = null; bodies = new Map(); searchIndex = new Map(); notesCache = new Map(); summaries = new Map();
@@ -246,8 +246,24 @@ async function connect() {
   }
 }
 
+async function disconnect() {
+  ++connectionVersion; ++openVersion; ++searchVersion; clearTimeout(searchTimer);
+  const previous = store; store = null;
+  active = null; articleReady = false; libraryItems = []; state = {}; meta = {}; notes = emptyNotes(); bot = '';
+  bodies.clear(); searchIndex.clear(); notesCache.clear(); summaries.clear();
+  query = ''; tag = ''; starredOnly = false; $('#search').value = ''; $('#search-status').textContent = '';
+  reader.close(); reader.setArticle('', []); pane.setArticle(null); $('#article-header').replaceChildren();
+  renderLibrary(); updateReaderButtons(); closeDrawers();
+  $('#reader-position').textContent = 'THE READING ROOM'; $('#sync-status').textContent = '';
+  $('#toast').hidden = true; clearTimeout(toastTimer);
+  if (previous) await previous.lock();
+}
+
+const access = new VaultAccess({ connect, disconnect, notify });
+
 async function searchBodies(version) {
   const currentStore = store;
+  if (!currentStore) return;
   const indexed = await currentStore.getSearchIndex();
   if (version !== searchVersion || store !== currentStore || !query.trim()) return;
   searchIndex = new Map(Object.entries(indexed));
@@ -268,7 +284,9 @@ let searchTimer;
 $('#search').addEventListener('input', e => {
   query = e.target.value; renderLibrary(); const version = ++searchVersion;
   clearTimeout(searchTimer);
-  if (query.trim()) searchTimer = setTimeout(() => searchBodies(version), 300);
+  if (query.trim()) searchTimer = setTimeout(() => {
+    void searchBodies(version).catch(error => { if (version === searchVersion) handleError(error); });
+  }, 300);
   else $('#search-status').textContent = '';
 });
 $('#star-filter').addEventListener('click', () => { starredOnly = !starredOnly; renderLibrary(); });
@@ -332,6 +350,7 @@ $('#notes-resizer').addEventListener('keydown', e => { if (e.key === 'ArrowLeft'
 function showSettings() {
   const settings = getSettings();
   for (const key of ['owner', 'repo', 'branch', 'token']) $('#settings-form').elements[key].value = settings[key] || '';
+  access.renderSecurity();
   $('#connection-result').textContent = ''; $('#settings-dialog').showModal();
 }
 function formSettings() { return Object.fromEntries(['owner', 'repo', 'branch', 'token'].map(key => [key, $('#settings-form').elements[key].value.trim()])); }
@@ -340,16 +359,18 @@ $('#help-open').addEventListener('click', () => $('#help-dialog').showModal());
 document.querySelectorAll('[data-close]').forEach(button => button.addEventListener('click', () => button.closest('dialog').close()));
 $('#test-connection').addEventListener('click', async e => {
   e.target.disabled = true; $('#connection-result').textContent = 'Testing private repository access…';
-  try { const test = new ReadingStore(formSettings()); const result = await test.testConnection(); $('#connection-result').textContent = result.message; }
+  const test = new ReadingStore(formSettings());
+  try { const result = await test.testConnection(); $('#connection-result').textContent = result.message; }
   catch (error) { $('#connection-result').textContent = error.message; }
-  finally { e.target.disabled = false; }
+  finally { test.dispose(); e.target.disabled = false; }
 });
 $('#settings-form').addEventListener('submit', async e => {
   e.preventDefault();
   const settings = formSettings();
   if (settings.token && !settings.owner) { $('#connection-result').textContent = 'Enter the GitHub owner for this private repository.'; return; }
-  await store?.flush().catch(handleError);
-  saveSettings(settings); $('#settings-dialog').close(); await connect();
+  if (access.unlocked) await access.leaveVault();
+  else await store?.flush().catch(handleError);
+  saveSettings(settings); $('#settings-form').elements.token.value = ''; $('#settings-dialog').close(); await connect(settings);
 });
 $('#export-data').addEventListener('click', async e => {
   e.target.disabled = true;
@@ -371,6 +392,7 @@ $('#import-data').addEventListener('change', async e => {
   e.target.value = '';
 });
 document.addEventListener('keydown', e => {
+  if (access.blocked || access.busy) return;
   if (e.key === 'Escape') {
     reader.closeActions();
     document.querySelectorAll('.item-status-menu[open]').forEach(menu => { menu.open = false; });
@@ -387,6 +409,7 @@ document.addEventListener('keydown', e => {
   } else if (actions[e.key]) { e.preventDefault(); actions[e.key](); }
 });
 function restoreArticle() {
+  if (access.blocked || !store) return;
   if (!location.hash.startsWith('#article=')) return;
   try {
     const slug = decodeURIComponent(location.hash.slice(9));
@@ -398,5 +421,5 @@ window.addEventListener('hashchange', restoreArticle);
 window.addEventListener('blur', () => { if (store) persist(store.flush()); });
 document.addEventListener('visibilitychange', () => { if (document.hidden && store) persist(store.flush()); });
 window.addEventListener('online', () => { if (store) persist(store.flush()); });
-closeDrawers(); connect();
+closeDrawers(); void access.start();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { /* The app still works when service workers are disabled. */ });

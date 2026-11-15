@@ -274,6 +274,29 @@ function transactionResult(transaction) {
   });
 }
 
+function openCacheDatabase() {
+  return new Promise((resolve, reject) => {
+    if (!globalThis.indexedDB) return reject(new Error('IndexedDB is unavailable. Enable browser storage for offline reading.'));
+    const request = indexedDB.open(DATABASE, 1);
+    let failed = false;
+    request.onupgradeneeded = () => {
+      for (const name of ['cache', 'queue']) {
+        if (!request.result.objectStoreNames.contains(name)) {
+          request.result.createObjectStore(name, { keyPath: 'key' }).createIndex('namespace', 'namespace');
+        }
+      }
+    };
+    request.onsuccess = () => {
+      if (failed) request.result.close();
+      else resolve(request.result);
+    };
+    request.onerror = request.onblocked = () => {
+      failed = true;
+      reject(new Error('Could not open the local reading cache. Check browser storage and close other Reading Terminal tabs.'));
+    };
+  });
+}
+
 function utf8Base64(text) {
   const bytes = new TextEncoder().encode(text);
   let binary = '';
@@ -308,36 +331,39 @@ export class ReadingStore extends EventTarget {
     this._flushPromise = null;
     this._timer = null;
     this._disposed = false;
+    this._locking = false;
+    this._lockPromise = null;
+    this._closePromise = null;
+    this._controllers = new Set();
   }
 
-  _emit(status, message) { this.dispatchEvent(new CustomEvent('change', { detail: { status, message } })); }
+  _emit(status, message) {
+    if (!this._disposed) this.dispatchEvent(new CustomEvent('change', { detail: { status, message } }));
+  }
   _error(error) {
+    if (this._disposed) return;
     this._lastError = error;
     this._emit('error', error.message || 'Sync failed. Your queued edits are retained on this device.');
   }
   _key(path) { return `${this.namespace}\n${path}`; }
   _now() { this._clock = Math.max(Date.now(), this._clock + 1); return new Date(this._clock).toISOString(); }
   _ensureReady() { return this._ready ||= this._load(); }
+  _assertActive() {
+    if (this._disposed) throw new Error('This library is locked or disconnected. Unlock it to continue.');
+  }
+  _assertOpen() {
+    this._assertActive();
+    if (this._locking) throw new Error('This library is locking. Unlock it to continue.');
+  }
 
   async _load() {
     try {
-      if (!globalThis.indexedDB) throw new Error('IndexedDB is unavailable. Enable browser storage for offline reading.');
-      this._db = await new Promise((resolve, reject) => {
-        const request = indexedDB.open(DATABASE, 1);
-        request.onupgradeneeded = () => {
-          for (const name of ['cache', 'queue']) {
-            if (!request.result.objectStoreNames.contains(name)) {
-              request.result.createObjectStore(name, { keyPath: 'key' }).createIndex('namespace', 'namespace');
-            }
-          }
-        };
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error || new Error('Could not open the local reading cache.'));
-        request.onblocked = () => reject(new Error('Close another Reading Terminal tab so the local cache can be opened.'));
-      });
+      this._db = await openCacheDatabase();
+      if (this._disposed) return;
       this._db.onversionchange = () => { this._db.close(); this._db = null; this._error(new Error('The local cache changed in another tab. Reload to continue saving offline.')); };
       const transaction = this._db.transaction(['cache', 'queue'], 'readonly');
       const [cache, queue] = await Promise.all(['cache', 'queue'].map(name => requestResult(transaction.objectStore(name).index('namespace').getAll(this.namespace))));
+      if (this._disposed) return;
       for (const record of cache) if (!this._cache.has(record.path)) this._cache.set(record.path, record);
       for (const entry of queue) {
         if (!writablePath(entry.path)) continue;
@@ -345,6 +371,7 @@ export class ReadingStore extends EventTarget {
         if (!this._queue.has(entry.path)) this._queue.set(entry.path, entry);
       }
     } catch (error) {
+      if (this._disposed) return;
       this._db = null;
       this._error(new Error(`${error.message} Pending text will also use a device recovery journal when available.`));
     }
@@ -380,6 +407,7 @@ export class ReadingStore extends EventTarget {
 
   _putCache(path, content, sha) {
     const record = { key: this._key(path), namespace: this.namespace, path, content, sha, fetched_at: new Date().toISOString() };
+    this._assertActive();
     this._cache.set(path, record);
     this._versions.set(path, (this._versions.get(path) || 0) + 1);
     return record;
@@ -395,6 +423,7 @@ export class ReadingStore extends EventTarget {
   }
 
   _persist(path) {
+    this._assertActive();
     const cache = clone(this._cache.get(path));
     const queued = clone(this._queue.get(path));
     const journalSaved = this._journal();
@@ -409,7 +438,7 @@ export class ReadingStore extends EventTarget {
       }
       const transaction = this._db.transaction(['cache', 'queue'], 'readwrite');
       const done = transactionResult(transaction);
-      if (cache) transaction.objectStore('cache').put(cache);
+      if (cache && !this._disposed) transaction.objectStore('cache').put(cache);
       if (queued) transaction.objectStore('queue').put(queued);
       else transaction.objectStore('queue').delete(this._key(path));
       await done;
@@ -419,12 +448,13 @@ export class ReadingStore extends EventTarget {
   }
 
   _schedule() {
-    if (this._disposed) return;
+    if (this._disposed || this._locking) return;
     clearTimeout(this._timer);
     this._timer = setTimeout(() => { this._timer = null; void this.flush(); }, 2000);
   }
 
   _queueEdit(path, content) {
+    this._assertOpen();
     if (!writablePath(path)) throw new Error('Refusing to write outside user/state.json and user/notes/.');
     const old = this._queue.get(path);
     const cached = this._cache.get(path);
@@ -441,13 +471,16 @@ export class ReadingStore extends EventTarget {
   }
 
   async init() {
+    this._assertOpen();
     if (this._initPromise) return this._initPromise;
     this._initPromise = (async () => {
       await this._ensureReady();
+      this._assertOpen();
       const [library, state, meta] = await Promise.all([
         this._freshOrCached('library.json'), this._freshOrCached('user/state.json', {}),
         this._freshOrCached('bot/meta.json', { updated_at: null, notes_summary_len: {} }),
       ]);
+      this._assertOpen();
       if (!this._lastError) this._emit(this._queue.size ? 'queued' : 'local', this.demo ? 'Demo · changes stay on this device.' : this._queue.size ? 'Local edits are waiting to sync.' : 'Private library ready.');
       return { library: clone(library), state: clone(state), meta: clone(meta) };
     })();
@@ -459,19 +492,21 @@ export class ReadingStore extends EventTarget {
     return `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${encodeURIComponent(branch)}`;
   }
 
-  async _request(url, options = {}) {
+  async _request(url, options = {}, kind = 'json') {
+    this._assertActive();
     if (globalThis.navigator?.onLine === false) throw new Error('Offline. Your local edits remain queued and will sync when you reconnect.');
     const controller = new AbortController();
+    this._controllers.add(controller);
     const timer = setTimeout(() => controller.abort(), 15000);
     try {
       const response = await fetch(url, {
         ...options, signal: controller.signal, cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer',
         headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', Authorization: `Bearer ${this.settings.token}`, ...options.headers },
       });
+      this._assertActive();
       if (!response.ok) {
-        let detail = '';
-        try { detail = (await response.json()).message || ''; } catch { /* Status alone is sufficient. */ }
-        let message = `GitHub returned ${response.status}${detail ? `: ${detail}` : '.'}`;
+        // Remote error text is untrusted and can echo request credentials.
+        let message = `GitHub returned ${response.status}. Your local edits remain queued.`;
         if (response.status === 401) message = 'GitHub rejected the token. Update it in Settings; queued notes are retained.';
         if (response.status === 403 || response.status === 429) message = response.headers.get('x-ratelimit-remaining') === '0' || response.status === 429
           ? 'GitHub rate limit reached. Wait before syncing again; queued notes are retained.'
@@ -481,22 +516,30 @@ export class ReadingStore extends EventTarget {
         error.status = response.status;
         throw error;
       }
-      return response;
+      const result = await response[kind]();
+      this._assertActive();
+      return result;
     } catch (error) {
+      this._assertActive();
       if (error.name === 'AbortError') throw new Error('GitHub did not respond in time. Your local edits remain queued; try syncing again.');
       if (error instanceof TypeError) throw new Error('Could not reach GitHub. Check your network; your local edits remain queued.');
       throw error;
-    } finally { clearTimeout(timer); }
+    } finally {
+      clearTimeout(timer);
+      this._controllers.delete(controller);
+    }
   }
 
   async _checkRepository() {
+    this._assertActive();
     if (this.demo) return;
     if (!this.settings.owner || !this.settings.repo || /[\\/\u0000-\u001f]/.test(this.settings.owner + this.settings.repo)) {
       throw new Error('Set a GitHub owner and repository name in Settings.');
     }
     if (!this._repositoryPromise) {
       this._repositoryPromise = this._request(`https://api.github.com/repos/${encodeURIComponent(this.settings.owner)}/${encodeURIComponent(this.settings.repo)}`)
-        .then(response => response.json()).then(repository => {
+        .then(repository => {
+          this._assertActive();
           if (!repository.private) throw new Error('Reading data must be in a private repository. This connection was refused to protect your notes.');
           return repository;
         }).catch(error => { this._repositoryPromise = null; throw error; });
@@ -507,23 +550,27 @@ export class ReadingStore extends EventTarget {
   async _fetchRemote(path, fallback, kind = 'text') {
     await this._checkRepository();
     let response;
-    try { response = await this._request(this._contentUrl(path), kind === 'blob' ? { headers: { Accept: 'application/vnd.github.raw+json' } } : {}); }
+    try {
+      response = await this._request(this._contentUrl(path),
+        kind === 'blob' ? { headers: { Accept: 'application/vnd.github.raw+json' } } : {},
+        kind === 'blob' ? 'blob' : 'json');
+    }
     catch (error) {
       if (error.status === 404 && fallback !== undefined) return { content: clone(fallback), sha: null };
       throw error;
     }
     if (kind === 'blob') {
-      let blob = await response.blob();
+      let blob = response;
       const extension = path.split('.').pop().toLowerCase();
       const type = { pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', avif: 'image/avif' }[extension];
       if (type && blob.type !== type) blob = new Blob([blob], { type });
       return { content: blob, sha: null };
     }
-    const data = await response.json();
+    const data = response;
     if (!data || data.type !== 'file') throw new Error(`Expected a file at ${path}.`);
     let text;
     if (data.encoding === 'base64' && typeof data.content === 'string') text = base64Text(data.content);
-    else text = await (await this._request(this._contentUrl(path), { headers: { Accept: 'application/vnd.github.raw+json' } })).text();
+    else text = await this._request(this._contentUrl(path), { headers: { Accept: 'application/vnd.github.raw+json' } }, 'text');
     let content = text;
     if (path.endsWith('.json')) {
       try { content = JSON.parse(text); } catch { throw new Error(`${path} is not valid JSON. No remote data was overwritten.`); }
@@ -533,7 +580,7 @@ export class ReadingStore extends EventTarget {
   }
 
   _notify(path, previous, content) {
-    if (equal(previous, content)) return;
+    if (this._disposed || equal(previous, content)) return;
     if (path.startsWith('user/notes/')) this.dispatchEvent(new CustomEvent('notes-updated', { detail: { slug: noteSlug(path), notes: clone(content) } }));
     else if (path === 'user/state.json') this.dispatchEvent(new CustomEvent('state-updated', { detail: { state: clone(content) } }));
     else if (path.startsWith('bot/summaries/')) this.dispatchEvent(new CustomEvent('summary-updated', { detail: { slug: path.slice('bot/summaries/'.length, -3), markdown: content } }));
@@ -541,10 +588,12 @@ export class ReadingStore extends EventTarget {
   }
 
   async _refresh(path, fallback, kind = 'text') {
+    this._assertActive();
     if (this._reads.has(path)) return this._reads.get(path);
     const work = (async () => {
       const version = this._versions.get(path) || 0;
       const remote = await this._fetchRemote(path, fallback, kind);
+      this._assertActive();
       const previous = this._cache.get(path)?.content;
       const pending = this._queue.get(path);
       // A completed save or sync during this GET makes its response potentially stale.
@@ -557,6 +606,7 @@ export class ReadingStore extends EventTarget {
       this._putCache(path, content, remote.sha);
       this._notify(path, previous, content);
       await this._persist(path);
+      this._assertActive();
       return clone(this._cache.get(path).content);
     })();
     this._reads.set(path, work);
@@ -564,7 +614,9 @@ export class ReadingStore extends EventTarget {
   }
 
   async _freshOrCached(path, fallback, kind = 'text') {
+    this._assertOpen();
     await this._ensureReady();
+    this._assertOpen();
     if (this.demo) {
       if (this._cache.has(path)) return clone(this._cache.get(path).content);
       if (fallback !== undefined) return clone(fallback);
@@ -572,6 +624,7 @@ export class ReadingStore extends EventTarget {
     }
     try { return await this._refresh(path, fallback, kind); }
     catch (error) {
+      this._assertOpen();
       this._error(error);
       if (this._cache.has(path)) return clone(this._cache.get(path).content);
       throw error;
@@ -579,7 +632,9 @@ export class ReadingStore extends EventTarget {
   }
 
   async _get(path, fallback, kind = 'text') {
+    this._assertOpen();
     await this._ensureReady();
+    this._assertOpen();
     const cached = this._cache.get(path);
     if (cached) {
       if (!this.demo) void this._refresh(path, fallback, kind).catch(error => this._error(error));
@@ -592,19 +647,23 @@ export class ReadingStore extends EventTarget {
   getNotes(slug) { return this._get(`user/notes/${safeSlug(slug)}.json`, emptyNotes()); }
   getSummary(slug) { return this._get(`bot/summaries/${safeSlug(slug)}.md`, ''); }
   getSearchIndex() {
+    this._assertOpen();
     return this._searchIndexPromise ||= (async () => {
       await this._ensureReady();
+      this._assertOpen();
       let content = this._cache.get('search-index.json')?.content;
       if (!this.demo) {
         try { content = await this._refresh('search-index.json', {}); }
         catch { /* Optional index: use cached entries or lazy article fetching. */ }
       }
+      this._assertOpen();
       if (!dictionary(content)) return {};
       return Object.fromEntries(Object.entries(content).filter(([slug, text]) => safeKey(slug) && typeof text === 'string'));
     })();
   }
 
   async getAsset(path, from = '') {
+    this._assertOpen();
     if (typeof path !== 'string' || !path || /^[a-z][a-z\d+.-]*:|^\/\//i.test(path) || /[\\\u0000-\u001f?#]/.test(path)) {
       throw new Error('Private assets must use a repository-relative path.');
     }
@@ -621,6 +680,7 @@ export class ReadingStore extends EventTarget {
     const normalized = parts.join('/');
     if (!normalized) throw new Error('Private assets must name a file in the repository.');
     const blob = await this._get(normalized, undefined, 'blob');
+    this._assertOpen();
     const cached = this._cache.get(normalized);
     const existing = this._assetUrls.get(normalized);
     if (existing && existing.version === cached?.fetched_at) return existing.url;
@@ -631,6 +691,7 @@ export class ReadingStore extends EventTarget {
   }
 
   saveState(state) {
+    this._assertOpen();
     const incoming = normalizeState(state);
     const previous = normalizeState(this._cache.get('user/state.json')?.content);
     const result = clone(previous);
@@ -653,6 +714,7 @@ export class ReadingStore extends EventTarget {
   }
 
   saveNotes(slug, notes) {
+    this._assertOpen();
     const path = `user/notes/${safeSlug(slug)}.json`;
     const previous = normalizeNotes(this._cache.get(path)?.content);
     const incoming = normalizeNotes({ ...previous, ...notes });
@@ -679,8 +741,7 @@ export class ReadingStore extends EventTarget {
     await this._checkRepository();
     const body = { message: `Update reading ${path === 'user/state.json' ? 'state' : 'notes'}`, content: utf8Base64(`${JSON.stringify(content, null, 2)}\n`), branch: this.settings.branch };
     if (sha) body.sha = sha;
-    const response = await this._request(this._contentUrl(path), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    const result = await response.json();
+    const result = await this._request(this._contentUrl(path), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     return result.content?.sha || null;
   }
 
@@ -691,6 +752,7 @@ export class ReadingStore extends EventTarget {
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const fallback = path === 'user/state.json' ? {} : emptyNotes();
       const remote = await this._fetchRemote(path, fallback);
+      this._assertActive();
       sent = path === 'user/state.json' ? mergeState(snapshot.content, remote.content, snapshot.base) : mergeNotes(snapshot.content, remote.content, snapshot.base);
       try { sha = await this._putRemote(path, sent, remote.sha); break; }
       catch (error) {
@@ -698,6 +760,7 @@ export class ReadingStore extends EventTarget {
         if (attempt === 3) throw new Error('GitHub still reports a conflicting update. Your edits remain queued; try syncing again shortly.');
       }
     }
+    this._assertActive();
     const current = this._queue.get(path);
     const previous = this._cache.get(path)?.content;
     let content = sent;
@@ -712,16 +775,18 @@ export class ReadingStore extends EventTarget {
   }
 
   async flush() {
+    if (this._disposed) return { pending: 0 };
     clearTimeout(this._timer);
     this._timer = null;
     if (this._flushPromise) return this._flushPromise;
     this._flushPromise = (async () => {
       await this._ensureReady();
+      if (this._disposed) return { pending: 0 };
       // Finish cache reconciliation before taking a write snapshot. In particular,
       // a failed offline GET must release its repository check before reconnect.
       await Promise.allSettled([...this._reads].filter(([path]) => writablePath(path)).map(([, read]) => read));
       await this._persistTail;
-      if (!this._queue.size) return { pending: 0 };
+      if (this._disposed || !this._queue.size) return { pending: 0 };
       this._emit('sync', this.demo ? 'Saving demo locally…' : 'Syncing with your private repository…');
       try {
         if (this.demo && !this._db) throw new Error('IndexedDB is unavailable. Demo edits remain in the recovery journal; enable browser storage for normal offline saving.');
@@ -741,10 +806,12 @@ export class ReadingStore extends EventTarget {
   }
 
   async testConnection() {
+    this._assertOpen();
     if (this.demo) return { ok: true, demo: true, message: 'Demo mode is local. Add a token to test a private repository connection.' };
     this._repositoryPromise = null;
     const repository = await this._checkRepository();
     const result = await this._fetchRemote('library.json');
+    this._assertOpen();
     if (repository.permissions?.push === false) throw new Error('The token can read this repository but cannot write. Enable Contents read/write for note syncing.');
     return {
       ok: true, demo: false, articles: result.content.length,
@@ -754,15 +821,13 @@ export class ReadingStore extends EventTarget {
 
   async _remoteNoteSlugs() {
     await this._checkRepository();
-    let response;
-    try { response = await this._request(this._contentUrl('user/notes')); }
+    let files;
+    try { files = await this._request(this._contentUrl('user/notes')); }
     catch (error) { if (error.status === 404) return []; throw error; }
-    const files = await response.json();
     if (!Array.isArray(files)) throw new Error('Expected user/notes to be a directory.');
     if (files.length >= 1000) {
       const { owner, repo, branch } = this.settings;
-      const response = await this._request(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(branch)}?recursive=1`);
-      const tree = await response.json();
+      const tree = await this._request(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(branch)}?recursive=1`);
       if (tree.truncated || !Array.isArray(tree.tree)) throw new Error('The repository is too large for a complete GitHub tree listing. This backup includes cached notes only.');
       return tree.tree.filter(entry => entry.type === 'blob' && /^user\/notes\/[^/]+\.json$/.test(entry.path))
         .map(entry => safeSlug(noteSlug(entry.path)));
@@ -771,7 +836,9 @@ export class ReadingStore extends EventTarget {
   }
 
   async exportData() {
+    this._assertOpen();
     await this._ensureReady();
+    this._assertOpen();
     const warnings = [];
     const slugs = new Set();
     for (const path of this._cache.keys()) if (path.startsWith('user/notes/')) slugs.add(noteSlug(path));
@@ -784,6 +851,7 @@ export class ReadingStore extends EventTarget {
       catch (error) { warnings.push(`${slug}: ${error.message}`); }
     }
     try { await this._freshOrCached('user/state.json', {}); } catch (error) { warnings.push(error.message); }
+    this._assertOpen();
     const notes = {};
     for (const [path, record] of this._cache) if (path.startsWith('user/notes/')) notes[noteSlug(path)] = clone(record.content);
     if (warnings.length) this._emit('error', 'Backup contains all cached user data, but some remote notes were unavailable. Keep an additional backup after reconnecting.');
@@ -795,11 +863,13 @@ export class ReadingStore extends EventTarget {
   }
 
   async importData(data) {
+    this._assertOpen();
     if (!dictionary(data) || (data.format && data.format !== 'reading-terminal-user-data') || (data.version && data.version !== 1) ||
         !dictionary(data.state) || !dictionary(data.notes)) throw new Error('Choose a Reading Terminal user-data JSON backup containing state and notes.');
     const state = normalizeState(data.state);
     const incoming = Object.entries(data.notes).map(([slug, notes]) => [safeSlug(slug), normalizeNotes(notes)]);
     await this._ensureReady();
+    this._assertOpen();
     // Validate the complete backup before making any changes, then merge through the normal durable queue.
     const mergedState = mergeState(this._cache.get('user/state.json')?.content || {}, state);
     await this.saveState(mergedState);
@@ -811,19 +881,101 @@ export class ReadingStore extends EventTarget {
       }
       const merged = mergeNotes(current, notes);
       await this.saveNotes(slug, merged);
+      this._assertOpen();
       this._notify(path, current, this._cache.get(path).content);
     }
+    this._assertOpen();
     this.dispatchEvent(new CustomEvent('state-updated', { detail: { state: clone(this._cache.get('user/state.json').content) } }));
     this._emit('queued', this.demo ? 'Backup merged into this device’s demo data.' : 'Backup merged locally and queued for private-repository sync.');
     return { notes: incoming.length, state: clone(this._cache.get('user/state.json').content) };
   }
 
-  dispose() {
+  _stop() {
     this._disposed = true;
     clearTimeout(this._timer);
+    this._timer = null;
+    for (const controller of this._controllers) controller.abort();
+    this._controllers.clear();
+    this.settings.token = '';
     for (const { url } of this._assetUrls.values()) URL.revokeObjectURL(url);
     this._assetUrls.clear();
-    // Do not close the database while an already-started local save is committing.
-    void this._persistTail.finally(() => { this._db?.close(); this._db = null; });
+    this._cache.clear();
+    this._queue.clear();
+    this._versions.clear();
+    this._reads.clear();
+    this._initPromise = null;
+    this._searchIndexPromise = null;
+    this._repositoryPromise = null;
+    this._lastError = null;
+  }
+
+  lock() {
+    if (this._lockPromise) return this._lockPromise;
+    this._locking = true;
+    this._lockPromise = (async () => {
+      let timer;
+      try {
+        await Promise.race([
+          this.flush().catch(() => {}),
+          new Promise(resolve => { timer = setTimeout(resolve, 1500); }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+        this._stop();
+      }
+      // Already-scheduled writes own immutable queue snapshots. Drain those
+      // before deleting cache records, so neither an old GET nor a local save
+      // can restore private content after Lock has completed.
+      await this._ready?.catch(() => {});
+      await this._persistTail;
+      await this._closePromise;
+      try {
+        const db = this._db ||= await openCacheDatabase();
+        const transaction = db.transaction('cache', 'readwrite');
+        const done = transactionResult(transaction);
+        const cache = transaction.objectStore('cache');
+        const cursor = cache.index('namespace').openKeyCursor(this.namespace);
+        cursor.onsuccess = () => {
+          if (!cursor.result) return;
+          cache.delete(cursor.result.primaryKey);
+          cursor.result.continue();
+        };
+        // The queue object store and synchronous recovery journal are excluded.
+        await done;
+      } catch {
+        throw new Error('The library is locked, but its offline cache could not be cleared. Allow browser storage and lock again.');
+      } finally {
+        this._db?.close();
+        this._db = null;
+      }
+    })().catch(error => {
+      this._lockPromise = null;
+      throw error;
+    });
+    return this._lockPromise;
+  }
+
+  dispose() {
+    if (this._lockPromise || this._closePromise) return;
+    this._stop();
+    // Keep already-started local saves durable without allowing their network
+    // continuations to repopulate memory or start another authenticated request.
+    this._closePromise = (async () => {
+      await this._ready?.catch(() => {});
+      await this._persistTail;
+      this._db?.close();
+      this._db = null;
+    })();
+  }
+}
+
+/** Validate setup access using the same private-only check as normal reads. */
+export async function checkPrivateRepository(settings) {
+  const store = new ReadingStore(settings);
+  try {
+    if (store.demo) throw new Error('Enter a GitHub access token to check the private reading repository.');
+    return await store._checkRepository();
+  } finally {
+    store.dispose();
   }
 }

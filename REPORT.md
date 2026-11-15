@@ -146,3 +146,50 @@ Implemented all nine numbered fixes from `../review/REVIEW.md`. Changes are conf
 - **Visual/direct browser checks:** dark and light desktop surfaces and mobile notes were inspected. Desktop widths at 1440 × 900 were **302.39 / 705.61 / 432 px**; compact rows were **56.44 px**, with **10 fully visible rows** in the 24-item fixture. At 390 × 844, notes measured **358.80 px**, the covered reader was inert and document width stayed **390 px**. A 45-line editor grew to **1111 px** and shrank to **235 px** after native deletion. Floating-button and custom-context-menu highlights focused their editors and updated margin notes; no page errors.
 
 The live-GitHub, Safari/iOS and touch/IME limits above still apply. Bot-side asset copying and optional index generation remain the data producer's responsibility; this pass changes only the app.
+
+## UNLOCK
+
+### Delivered
+
+- Added `js/vault.js`: WebCrypto AES-256-GCM envelope encryption, authenticated vault/slot identities, one PBKDF2-SHA256 password slot (600,000 iterations minimum), HKDF-SHA256 PRF slots, strict format validation, immutable passkey/password changes, and uniform password failures.
+- Added `js/passkey.js`: hostname-derived RP, resident/user-verified credentials, credential-specific PRF evaluation, optional second registration prompt, feature detection and explicit unsupported-PRF fallback. No third-party cryptography or CDN dependencies.
+- Added `js/auth.js` and `js/vault-api.js`: themed mobile lock/setup screens, first-use and replacement consent, direct encrypted Contents API publication, Settings Security, current-password verification, passkey removal confirmation, and slot-by-id merging with one 409/422 retry. Concurrent password changes and different vault identities are not silently overwritten.
+- Added `js/session.js`: remembered payload/DEK encrypted under a non-extractable AES-GCM CryptoKey structured-cloned into a separate IndexedDB database. Normal vault tokens never enter localStorage/sessionStorage. Remember-off is memory-only. A replacement identity invalidates a remembered session; older same-identity Pages publications do not roll back newer local commits.
+- Added top-bar Lock and `ReadingStore.lock()`: bounded best-effort sync, request cancellation, token/reference erasure, blob revocation and current-library cache clearing, while preserving queued edits and recovery-journal data. Delayed operations cannot repopulate a locked library or restore a replaced vault session.
+- Legacy manual-token settings remain under **Advanced: connect with a token** and work when no vault exists. Successful vault unlocking removes an old persisted manual token. Demo remains explicit and isolated; backup data never includes vault secrets.
+- Added `blob:` to CSP connect-src, declared the existing ICO fallback, and bumped the service worker to `reading-terminal-shell-v3` with all new modules. Vault reads/navigations remain network-only and outside the shell cache.
+- Updated `DESIGN.md` with the threat model and `README.md` with setup, device trust, recovery and revocation instructions. The public-vault/Git-history risk and plaintext queued-edit exception are explicit.
+
+Changes are confined to `site/`. No real GitHub requests, real credentials, deployment, commit or push were performed. **No `site/vault.json` was created**; setup tests capture encrypted PUTs in memory. The two package metadata files enable Node ES modules and `node --test site/tests/`; they add no build step or dependencies.
+
+### Verification actually run
+
+- **Syntax:** `node --check` passed for all 13 `.js` files and `tests/vault.test.mjs`.
+- **Crypto:** `node --test site/tests/` passed **18 tests** on Node **24.22.1**. Coverage includes password/PRF round trips, wrong passwords, payload/wrap tampering, vault/slot AAD and swapped wraps, low-iteration refusal, malformed envelopes/payloads, unchanged-DEK password rotation, passkey removal, second-prompt registration, unsupported PRF, concurrent slot deletion/addition, concurrent password changes and replacement-vault rejection.
+- **Unlock browser scenarios:** all six passed in headless Chrome with mocked GitHub endpoints: encrypted setup PUT, wrong/right password, remembered and memory-only reloads, offline remembered boot/retry, cache clearing with queued-edit recovery, replacement consent/invalidation, current-password validation, 409 password-change merge, 422 passkey-removal retry, cancellation of an active search, and vault replacement during a deliberately delayed real KDF. No uncaught page exceptions or unexpected network requests were observed in that successful run.
+- **Original combined regression run:** `python3 tests/smoke.py http://127.0.0.1:8765` reported all **13 top-level scenarios** passing in **60.09 seconds**, ending with `PASS all fictional headless reading-terminal regressions`. Existing navigation/PDF/image/layout, full/absent/malformed/partial search-index, debounce/status/notes growth, native Text-node drag/highlight persistence, keyboard/stars/read threshold, mobile/demo, and conflict/export/import checks remained passing alongside the six unlock scenarios. The CDP scenario accepted a `SecurityError` incorrectly mapped to the unsupported-PRF fallback; it did not exercise successful PRF unlock.
+- **Storage inspection:** the remembered key was non-extractable and `exportKey('raw', key)` failed. IndexedDB record fields contained ciphertext and metadata, not plaintext token/payload/DEK fields. Normal Web Storage contained no fixture credentials.
+- **Stalled-write scenario:** with a PUT deliberately held open, Lock completed in **1,504.6 ms**, cleared the store token, revoked its PDF blob URL, retained the queued note, and a newly unlocked store synced that exact note.
+- **Real service worker:** a fresh Chromium context installed and activated `reading-terminal-shell-v3` with 17 public shell URLs and no vault/API entries. Offline shell reload worked; a vault fetch failed with a network error, and direct navigation to `/vault.json` failed with `ERR_INTERNET_DISCONNECTED` rather than receiving index.html. A scripted blob fetch succeeded under CSP.
+- **Visual/direct UI:** inspected the actual 390 × 844 setup screen in light theme and lock screen in dark theme, with no horizontal overflow. Enter submitted a wrong password, displayed the exact specified failure and cleared the input. An empty-library setup retained `#setup`, and its Settings setup link successfully reopened setup and deleted the remembered record.
+- **WebAuthn correction:** the earlier claim that Chrome's virtual authenticator lacked usable PRF was incorrect. The `127.0.0.1` RP id caused `SecurityError`, which the UI misclassified as unsupported PRF. Use `localhost` with `hasPrf: true`, `ctap2_1`, and `internal`; the smoke now requires passkey registration, an encrypted vault commit, Lock and successful passkey unlock instead of accepting the fallback. Physical Face ID/Touch ID remains unverified.
+
+### Corrected during integration
+
+- Lock canceling an active body-index search originally surfaced an uncaught rejection. Search continuations now respect the connection/search generation, and real failures in the current search still report normally.
+- A background vault replacement originally returned early while password verification was busy. Replacement now forces Lock and invalidates the operation generation; late password/passkey results cannot commit or resurrect that session.
+- Browser regressions wait for Lock completion before reload and for desktop panes to stop being inert after a mobile-to-desktop resize. This avoids mistaking an unfinished lock or an unaccepted synthetic fill for completed user input.
+
+Live GitHub permissions/Pages publication, native Safari/iOS behavior, and physical passkey authenticators remain unverified. Non-extractable device keys are not protection against same-origin malicious code or a compromised browser profile. Revocation requires deleting the GitHub token and running setup again, not merely removing an old public vault slot.
+
+## UNLOCK fix pass 1
+
+- Setup retains the token on validation/network/GitHub errors and clears only the password fields; success clears all three. Change password already cleared all password fields on error and success, including mismatches; that behavior is unchanged and covered by smoke assertions.
+- Loading `#demo` opens the same isolated demo as the Explore link before vault/session loading. Passkey `SecurityError` now reports “Passkeys are not available on this address.”; cancellation and unsupported-PRF messages are unchanged.
+- The smoke defaults to `localhost` and uses Chrome's internal CTAP2.1 virtual authenticator with `hasPrf: true`. The prior address failure is no longer accepted as a PRF fallback success. README and DESIGN now explain the valid RP address and verification boundary.
+- **Syntax:** `node --check` passed for all 13 `.js` files and `tests/vault.test.mjs`.
+- **Node:** `node --test tests/` passed **19 tests**, including invalid-address versus cancellation/unsupported errors for both passkey registration and unlock.
+- **Browser smoke:** `python3 tests/smoke.py http://localhost:8765` passed all **13 top-level scenarios** in **61.01 seconds**. This includes token retention after mismatched passwords, a network failure and a GitHub 403; password clearing; direct `#demo` loading; and actual virtual-authenticator **add passkey → encrypted vault commit → Lock → passkey unlock**. The run printed `PASS CDP virtual authenticator PRF add and unlock (not physical hardware)` and `PASS all fictional headless reading-terminal regressions`.
+- **Direct visual checks:** inspected the loaded demo library and setup mismatch screen in Chrome; the token remained masked and both password fields were empty.
+
+All edits remain inside `site/`. No `vault.json` was created; mocked GitHub vault writes remained in memory. No real credentials, commit or push were used. Live GitHub and physical authenticator limits remain unchanged.
