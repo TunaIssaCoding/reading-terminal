@@ -1,0 +1,25 @@
+{
+  "format": "reading-terminal-vault",
+  "version": 1,
+  "vault_id": "mNUFTvk7U2T5Fopi7Pq6vA",
+  "updated_at": "2026-11-16T06:57:56.259Z",
+  "payload": {
+    "alg": "AES-256-GCM",
+    "iv": "gXITchOJDTMKUSHz",
+    "ct": "FUxZiLrS8Hezet4VmuWvrkNZe3mbDW-0-ElUw2LxlbRFdlQZy8zTazQqsWX_3Qcoz5dTjrr0YSuipVBuomZ2WyvJdtNN-LjIdbspm4gtYN9xpn36XrQbfe2Nj3tCLJsYjkvoHynY0vScTQwGBEAcvESM8oHpIDvtMHvDhTAbOl122YojXBjaQfGDqinMFlQ_f3YLCLl5rcfE7qky8UyMzmh38C9UeA_A1HHwoM19iSlaRTbAhe5_M_X5SYdbg3tfmW1mtBvYUCN12M2AI6G4omv4eTPMnu_qyGaASqc1M9ui2Ym89ZLhXFt-KJI"
+  },
+  "slots": [
+    {
+      "id": "LPcwqv6efW9cO0nYSmchWg",
+      "type": "password",
+      "kdf": "PBKDF2-SHA256",
+      "iterations": 600000,
+      "salt": "9FpMDBWHegquKc4wT9ywCw",
+      "wrap": {
+        "alg": "AES-256-GCM",
+        "iv": "hsD4wH5Lkieqmz9R",
+        "ct": "gVsZLzg-iRcizLAEyHBh96I2P0E2ebp6scFizdEUp8AMLZuQ2kJpHzXB3inTauoS"
+      }
+    }
+  ]
+}
