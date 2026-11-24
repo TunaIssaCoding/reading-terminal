@@ -254,7 +254,43 @@ function normalizeQueue(input) {
   if (input == null) return null;
   if (!dictionary(input) || !Array.isArray(input.queue) || typeof input.arrivals_since !== 'string' ||
       !Number.isFinite(Date.parse(input.arrivals_since))) throw new Error('Invalid reading queue: expected queue and arrivals_since.');
-  return clone(input);
+  for (const id of input.queue) if (!safeKey(id)) throw new Error('Invalid reading queue: article ids must be non-empty strings.');
+  const queue = [...new Set(input.queue)];
+  if (queue.length > 10) throw new Error('Up next is full. Finish or remove one first.');
+  return { ...clone(input), queue };
+}
+
+/** Remote order wins concurrent changes; only additions and removals relative to base are replayed. */
+export function mergeQueue(local, remote, base = null) {
+  const a = normalizeQueue(local);
+  const b = normalizeQueue(remote);
+  const ancestor = normalizeQueue(base);
+  if (!a) throw new Error('Invalid reading queue: a local queue is required.');
+  if (!b) return a;
+  const result = { ...b };
+  for (const key of new Set([...Object.keys(a), ...Object.keys(b)])) {
+    if (key === 'queue' || !safeKey(key)) continue;
+    const value = equal(b[key], ancestor?.[key]) && a[key] !== undefined ? a[key]
+      : b[key] !== undefined ? b[key] : a[key];
+    if (value !== undefined) result[key] = clone(value);
+  }
+  // The original arrival boundary belongs to the repository, not this device.
+  result.arrivals_since = b.arrivals_since;
+  const before = ancestor?.queue || [];
+  if (equal(b.queue, before)) result.queue = a.queue.slice();
+  else {
+    const localIds = new Set(a.queue);
+    const baseIds = new Set(before);
+    const removed = new Set(before.filter(id => !localIds.has(id)));
+    const queue = b.queue.filter(id => !removed.has(id));
+    const present = new Set(queue);
+    for (const id of a.queue) if (!baseIds.has(id) && !present.has(id)) {
+      queue.push(id);
+      present.add(id);
+    }
+    result.queue = queue.slice(0, 10);
+  }
+  return result;
 }
 
 function normalizeLibrary(input) {
@@ -345,7 +381,7 @@ export class ReadingStore extends EventTarget {
     super();
     this.settings = settingsValue(settings);
     this.demo = !this.settings.token;
-    this.namespace = this.demo ? 'demo:v1' : JSON.stringify([this.settings.owner.toLowerCase(), this.settings.repo.toLowerCase(), this.settings.branch]);
+    this.namespace = this.demo ? 'demo:v2' : JSON.stringify([this.settings.owner.toLowerCase(), this.settings.repo.toLowerCase(), this.settings.branch]);
     this._journalKey = `reading-terminal.pending:${this.namespace}`;
     this._cache = new Map();
     this._queue = new Map();
@@ -387,10 +423,32 @@ export class ReadingStore extends EventTarget {
   }
 
   async _load() {
+    if (this.demo) {
+      try {
+        const storage = globalThis.localStorage;
+        for (let index = (storage?.length || 0) - 1; index >= 0; index--) {
+          const key = storage.key(index);
+          if (key === 'demo:v1' || key?.endsWith(':demo:v1')) storage.removeItem(key);
+        }
+      } catch (error) { this._error(new Error(`Could not clear legacy demo preferences: ${error.message}`)); }
+    }
     try {
       this._db = await openCacheDatabase();
       if (this._disposed) return;
       this._db.onversionchange = () => { this._db.close(); this._db = null; this._error(new Error('The local cache changed in another tab. Reload to continue saving offline.')); };
+      if (this.demo) {
+        const cleanup = this._db.transaction(['cache', 'queue', 'backups'], 'readwrite');
+        const done = transactionResult(cleanup);
+        for (const name of ['cache', 'queue', 'backups']) {
+          const request = cleanup.objectStore(name).index('namespace').openCursor('demo:v1');
+          request.onsuccess = () => {
+            const cursor = request.result;
+            if (cursor) { cursor.delete(); cursor.continue(); }
+          };
+        }
+        await done;
+        if (this._disposed) return;
+      }
       const transaction = this._db.transaction(['cache', 'queue'], 'readonly');
       const [cache, queue] = await Promise.all(['cache', 'queue'].map(name => requestResult(transaction.objectStore(name).index('namespace').getAll(this.namespace))));
       if (this._disposed) return;
@@ -401,7 +459,10 @@ export class ReadingStore extends EventTarget {
       for (const entry of queue) {
         if (!writablePath(entry.path)) continue;
         this._revision = Math.max(this._revision, entry.revision || 0);
-        if (!this._queue.has(entry.path)) this._queue.set(entry.path, entry);
+        if (!this._queue.has(entry.path)) this._queue.set(entry.path, {
+          ...entry, createOnly: entry.path === 'user/queue.json' ? entry.createOnly !== false : undefined,
+          content: normalizeContent(entry.path, entry.content),
+        });
       }
     } catch (error) {
       if (this._disposed) return;
@@ -415,6 +476,7 @@ export class ReadingStore extends EventTarget {
         const previous = this._queue.get(entry.path);
         if (!previous || entry.revision > previous.revision) this._queue.set(entry.path, {
           ...entry, key: this._key(entry.path), namespace: this.namespace,
+          createOnly: entry.path === 'user/queue.json' ? entry.createOnly !== false : undefined,
           content: normalizeContent(entry.path, entry.content),
         });
         this._revision = Math.max(this._revision, entry.revision || 0);
@@ -425,7 +487,9 @@ export class ReadingStore extends EventTarget {
       for (const [slug, text] of Object.entries(demoArticles)) seeds[`articles/${slug}.md`] = text;
       for (const [slug, notes] of Object.entries(demoNotes)) seeds[`user/notes/${slug}.json`] = notes;
       for (const [slug, text] of Object.entries(demoSummaries)) seeds[`bot/summaries/${slug}.md`] = text;
-      for (const [path, content] of Object.entries(seeds)) if (!this._cache.has(path)) this._putCache(path, normalizeContent(path, clone(content)), null, JSON.stringify(content));
+      for (const [path, content] of Object.entries(seeds)) if (!path.startsWith('user/') || !this._cache.has(path)) {
+        this._putCache(path, normalizeContent(path, clone(content)), null, JSON.stringify(content));
+      }
     }
     for (const entry of this._queue.values()) this._putCache(entry.path, clone(entry.content), this._cache.get(entry.path)?.sha || null);
     if (this._db) {
@@ -494,6 +558,7 @@ export class ReadingStore extends EventTarget {
     const entry = {
       key: this._key(path), namespace: this.namespace, path,
       migration: options.migration || old?.migration,
+      createOnly: path === 'user/queue.json' ? options.createOnly ?? old?.createOnly ?? true : undefined,
       content: clone(content), base: clone(old ? old.base : cached?.content ?? null), revision: ++this._revision,
     };
     this._queue.set(path, entry);
@@ -523,7 +588,7 @@ export class ReadingStore extends EventTarget {
         await this._queueEdit('user/state.json', state, { migration: { time, library } });
       }
       const queue = existingQueue || { queue: [], arrivals_since: time };
-      if (!existingQueue) await this._queueEdit('user/queue.json', queue);
+      if (!existingQueue) await this._queueEdit('user/queue.json', queue, { createOnly: true });
       this._initialized = true;
       if (this._queue.size) this._schedule();
       if (!this._lastError) this._emit(this._queue.size ? 'queued' : this.demo ? 'local' : 'synced', this.demo ? 'Demo · changes stay on this device.' : this._queue.size ? 'Local edits are waiting to sync.' : 'Private library ready.');
@@ -557,7 +622,8 @@ export class ReadingStore extends EventTarget {
   }
 
   _mergePending(entry, remote) {
-    if (entry.path === 'user/queue.json') return remote || entry.content;
+    if (entry.path === 'user/queue.json') return entry.createOnly !== false
+      ? remote || entry.content : mergeQueue(entry.content, remote, entry.base);
     if (entry.path !== 'user/state.json') return mergeNotes(entry.content, remote, entry.base);
     return entry.migration
       ? mergeMigratingState(entry.content, remote, entry.base, entry.migration.library, entry.migration.time)
@@ -660,6 +726,7 @@ export class ReadingStore extends EventTarget {
     if (this._disposed || !this._initialized || equal(previous, content)) return;
     if (path.startsWith('user/notes/')) this.dispatchEvent(new CustomEvent('notes-updated', { detail: { slug: noteSlug(path), notes: clone(content) } }));
     else if (path === 'user/state.json') this.dispatchEvent(new CustomEvent('state-updated', { detail: { state: clone(content) } }));
+    else if (path === 'user/queue.json') this.dispatchEvent(new CustomEvent('queue-updated', { detail: { queue: clone(content) } }));
     else if (path.startsWith('bot/summaries/')) this.dispatchEvent(new CustomEvent('summary-updated', { detail: { slug: path.slice('bot/summaries/'.length, -3), markdown: content } }));
     else if (path.startsWith('articles/')) this.dispatchEvent(new CustomEvent('article-updated', { detail: { slug: path.slice('articles/'.length, -3), markdown: content } }));
   }
@@ -678,7 +745,7 @@ export class ReadingStore extends EventTarget {
       let content = remote.content;
       if (pending) {
         content = this._mergePending(pending, remote.content);
-        if (path === 'user/queue.json' && remote.content) this._queue.delete(path);
+        if (path === 'user/queue.json' && pending.createOnly !== false && remote.content) this._queue.delete(path);
         else this._queue.set(path, { ...pending, content: clone(content), base: clone(remote.content), revision: ++this._revision });
       }
       this._putCache(path, content, remote.sha, remote.raw);
@@ -792,6 +859,17 @@ export class ReadingStore extends EventTarget {
     return this._queueEdit('user/state.json', result);
   }
 
+  saveQueue(value) {
+    this._assertOpen();
+    if (!dictionary(value)) throw new Error('Invalid reading queue: expected an object.');
+    const path = 'user/queue.json';
+    const previous = normalizeQueue(this._cache.get(path)?.content);
+    const content = normalizeQueue({ ...previous, ...value, arrivals_since: previous?.arrivals_since || value.arrivals_since });
+    const durable = this._queueEdit(path, content, { createOnly: false });
+    this._notify(path, previous, content);
+    return durable;
+  }
+
   saveNotes(slug, notes) {
     this._assertOpen();
     const path = `user/notes/${safeSlug(slug)}.json`;
@@ -818,7 +896,6 @@ export class ReadingStore extends EventTarget {
 
   async _putRemote(path, content, sha) {
     if (!writablePath(path)) throw new Error('Refusing to write outside user/state.json, user/queue.json and user/notes/.');
-    if (path === 'user/queue.json' && sha) throw new Error('The reading queue can only be created, never overwritten.');
     await this._checkRepository();
     const body = { message: `Update reading ${path === 'user/state.json' ? 'state' : path === 'user/queue.json' ? 'queue' : 'notes'}`, content: utf8Base64(`${JSON.stringify(content, null, 2)}\n`), branch: this.settings.branch };
     if (sha) body.sha = sha;
@@ -835,7 +912,7 @@ export class ReadingStore extends EventTarget {
       const remote = await this._fetchRemote(path, fallback);
       this._assertActive();
       sent = this._mergePending(snapshot, remote.content);
-      if (path === 'user/queue.json' && remote.content) { sha = remote.sha; break; }
+      if (path === 'user/queue.json' && snapshot.createOnly !== false && remote.content) { sha = remote.sha; break; }
       if (equal(sent, remote.content)) { sha = remote.sha; break; }
       try { sha = await this._putRemote(path, sent, remote.sha); break; }
       catch (error) {
@@ -847,9 +924,11 @@ export class ReadingStore extends EventTarget {
     const current = this._queue.get(path);
     const previous = this._cache.get(path)?.content;
     let content = sent;
-    if (path !== 'user/queue.json' && current && current.revision !== snapshot.revision) {
+    if (current && current.revision !== snapshot.revision) {
       // Rebase edits made while GET/PUT was in flight onto what actually reached GitHub.
-      content = path === 'user/state.json' ? mergeState(current.content, sent, snapshot.content) : mergeNotes(current.content, sent, snapshot.content);
+      content = path === 'user/state.json' ? mergeState(current.content, sent, snapshot.content)
+        : path === 'user/queue.json' ? mergeQueue(current.content, sent, snapshot.content)
+          : mergeNotes(current.content, sent, snapshot.content);
       this._queue.set(path, { ...current, migration: undefined, content: clone(content), base: clone(sent), revision: ++this._revision });
     } else this._queue.delete(path);
     this._putCache(path, clone(content), sha);
@@ -975,7 +1054,7 @@ export class ReadingStore extends EventTarget {
     // Validate the complete backup before making any changes, then merge through the normal durable queue.
     const mergedState = mergeState(this._cache.get('user/state.json')?.content || {}, state);
     await this.saveState(mergedState);
-    if (queue && !await this._freshOrCached('user/queue.json', null)) await this._queueEdit('user/queue.json', queue);
+    if (queue && !await this._freshOrCached('user/queue.json', null)) await this._queueEdit('user/queue.json', queue, { createOnly: true });
     for (const [slug, notes] of incoming) {
       const path = `user/notes/${slug}.json`;
       let current = this._cache.get(path)?.content;

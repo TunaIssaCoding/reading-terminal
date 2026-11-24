@@ -362,3 +362,89 @@ No `vault.json` was created or edited; no secrets or real data, commit, push or 
 Only release 2.1 was implemented. No Tasks changes, Arrivals/Up next/triage/shelves/Edition UI, Listen, external scripts, real data, commits, pushes or deployment. No `vault.json` was created or edited. The optional Up next-cap test does not apply to the disabled choice.
 
 Native iPhone/iPad Safari, physical authenticators and live GitHub/Pages publication were not available for verification. Chrome mobile/touch emulation and the virtual authenticator are not evidence of native Safari or physical-device support. The new parser avoids regex lookbehind and external dependencies. Pre-v2 backups survive Lock but remain unencrypted device data; clearing browser storage deletes them.
+
+## v2 phase 3.1
+
+### Changes and choices
+
+- Implemented only Reading Arrivals, Up next, triage and Library shelves, plus the two demo/empty-reader fixes. Desktop mode controls show live counts; mobile preserves Library/title/Notes/⋯ and adds a one-tap mode strip below the bar.
+- Default selection is Up next → Arrivals → Library. Article deep links still open directly. A single comment in `defaultView` marks the future Edition default hook; there is no Edition UI or editions-file access.
+- Arrivals reuse the inclusive `splitArrivals` boundary with `created_at` fallback. Post-boundary untriaged records qualify regardless of progress; the older pile requires New. Cards show metadata, author, generated-title italics, summary and lede. Missing ledes use a lazy cached body read, safe markdown-to-plain-text extraction and its first 300 characters.
+- U/K/L/Enter stamp triage; U/K retain New, L sets Let go, Enter follows normal opening rules. Every triage decision and queue removal offers six-second Undo. “Keep in library” is triage, not the independent ★ Keeper flag. Queue-changing Undo restores its original queue snapshot/order; later queue edits within that window are rolled back by that snapshot, while unrelated state fields survive.
+- Added durable `saveQueue` and `queue-updated` reconciliation, preserving create-only migration intent and recovery compatibility. SHA conflicts keep remote order, apply local removals relative to the base, and append local additions; uncontested local reorders survive. Concurrent overflow uses remote priority and caps the merged result at ten. README and DESIGN document these rules.
+- Queue rows show title/source/minutes/Reading progress; Enter opens, x removes while retaining triage, pointer-captured handles support mouse/touch, and Alt+↑/↓ reorders. DOM replacement defers during dragging. Finish and Let go remove membership; reader progress Undo restores the queue.
+- Four collapsible shelves show rules, counts and three previews; collapse choices persist per namespace. Triage 20 uses a fixed oldest-first batch without replenishing it. Weekly pile accounting uses local Monday 00:00, including its exact boundary.
+- Demo now contains 42 fictional records: original six migration examples, three queued pieces, four additional Arrivals with metadata omissions, 27 pile pieces, and two old/never-opened Keepers. A fresh demo opens its first queued article. Read-only fixtures refresh; existing local demo state, queue and notes are preserved. Empty readers hide progress, finish, Keeper and article-menu controls; r/s do nothing.
+- Changed `index.html`, `styles.css`, `js/app.js`, `js/model.js`, `js/store.js`, `js/demo.js`; added `js/modes.js` and `js/triage.js`. Added queue/modes/triage unit suites and extended `tests/smoke.py`, retaining all existing scenarios. Updated the test entry point and model tests. Updated README/DESIGN and bumped `sw.js` to `reading-terminal-shell-v6`, listing both new modules.
+
+### Verification actually run
+
+Served from `site/` with:
+
+```sh
+python3 -m http.server 8808 --bind 127.0.0.1
+```
+
+Syntax checking covered all **18 application JavaScript files and 9 test modules**:
+
+```sh
+node --check sw.js && node --check js/app.js && node --check js/auth.js && node --check js/bot.js && node --check js/demo.js && node --check js/library.js && node --check js/markdown.js && node --check js/model.js && node --check js/modes.js && node --check js/triage.js && node --check js/notes.js && node --check js/passkey.js && node --check js/progress.js && node --check js/reader.js && node --check js/session.js && node --check js/store.js && node --check js/vault-api.js && node --check js/vault.js && node --check tests/index.mjs && node --check tests/no-dialogs.test.mjs && node --check tests/vault.test.mjs && node --check tests/model.test.mjs && node --check tests/bot.test.mjs && node --check tests/progress.test.mjs && node --check tests/queue.test.mjs && node --check tests/modes.test.mjs && node --check tests/triage.test.mjs
+node --test tests/
+```
+
+Unit results: **85 passed, 0 failed, 0 skipped**, including no-dialogs, vault, migration, bot-box, queue cap/merge/recovery/SHA/in-flight writes, inclusive arrivals/pile boundaries, triage Undo, local-Monday counts, default modes and the strict 60-day shelf boundary.
+
+Initial verification caught a removed-but-still-used test import, an overly broad mode-button selector that also matched `body[data-mode]`, a harness startup race, and queued native details-toggle persistence racing shelf hydration. The import/selector were corrected, the harness now waits for mode initialization, and shelf choices persist synchronously on activation before re-rendering. Focused `shelves_and_pile_batch` and `mobile_modes_and_touch_queue` scenarios passed after the fixes.
+
+Direct managed-Chromium visual inspection covered **1440 × 900** and **390 × 844**: demo queue with an open article, triage cards/body fallback, mobile mode strip, queue drawer and Library shelves. Triage 20 K reduced the batch from 20 to 19; Undo restored `demo-pile-01`. No new page exceptions were reported after the selector correction, and the managed tab was closed.
+
+A throwaway browser run rendered **1,500 fictional records**, all 1,500 Library rows, four shelves and twelve shelf previews in **168 ms** on this environment. It exercised the real Library and ModeViews classes without fetching bodies for shelves. This is a single desktop measurement, not an iPad performance guarantee; its temporary DOM and Python import bytecode were removed.
+
+Retained regressions additionally exposed the obsolete fixed visible-row count (shelves now share the Library scroller), mobile overflow stacking beneath the new mode strip, and a sync-age test advancing less than a full refresh interval beyond one minute. Removed the incidental row-count assertion while retaining density/persistence coverage; raised the mobile top bar above the strip; made the sync test wait for the actual note write and include the next 15-second refresh. All retained scenarios passed in focused runs, including all four search-index variants and virtual-authenticator PRF add/unlock.
+
+Final whole-suite command, after the fixes:
+
+```sh
+python3 tests/smoke.py http://localhost:8808
+```
+
+**All 27 top-level scenarios passed in 190.60 seconds**, using headless system Chrome `/usr/bin/google-chrome`, fictional data and intercepted GitHub/vault endpoints:
+
+```text
+PASS reading_defaults_and_empty_header
+PASS arrivals_decisions_and_persisted_undo
+PASS queue_cap_and_conflict
+PASS queue_reorder_remove_and_reader_undo
+PASS shelves_and_pile_batch
+PASS mobile_modes_and_touch_queue
+PASS navigation_media_layout
+PASS indexed_search
+PASS debounce_status_and_growth
+PASS highlight_drag_and_persistence
+PASS keyboard_stars_and_read
+PASS phase_one_surface
+PASS selection_toolbar_and_undo
+PASS automatic_status_undo_and_typing
+PASS relative_sync_timer
+PASS mobile_and_demo
+PASS real_state_migration
+PASS demo_state_migration
+PASS reader_progress_and_bot
+PASS library_filters_and_fallbacks
+PASS store_conflict_export_import
+PASS setup_unlock_remember_lock
+PASS setup_replacement_and_invalidation
+PASS security_password_remove_conflicts
+PASS lock_during_search
+PASS replacement_during_security_work
+PASS cdp_passkey_unlock
+PASS all fictional headless reading-terminal regressions
+```
+
+The suite also passed all four search-index variants and CDP virtual-authenticator PRF add/unlock. New scenarios prove U/K/L/Enter and arrow navigation, state/queue Undo after persistence, unchanged state/queue on the eleventh add, a real-mode `user/queue.json` SHA retry, mouse/touch/Alt-arrow reorder, x removal, finish/Let go queue restoration, shelf collapse isolation and fixed twenty-item pile triage. No uncaught page exceptions or unexpected network requests were reported.
+
+### Boundaries
+
+No Tasks changes, Edition view/editions reading, connection Keep-link polish, Listen, external scripts, real data or secrets. No `vault.json`, bot-owned file or library data file was created or edited. No commit, push or deployment. Native iPhone/iPad Safari, physical authenticators and live GitHub/Pages remain unverified; Chrome touch emulation and the fictional API do not establish those.
+
+v2 phase 3.1 — Fix pass 1: demo now uses `demo:v2`; startup removes `demo:v1` IndexedDB cache/queue/backup records and localStorage keys including the pending journal without touching real-library data. Returning-demo browser regression failed before and passed after; all 27 JS/module syntax checks, 85 Node tests, and all 28 full smoke scenarios passed against http://localhost:8808. No vault.json, secrets, commit, push or deployment.

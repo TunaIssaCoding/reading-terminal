@@ -5,7 +5,9 @@ import { Reader } from './reader.js';
 import { VaultAccess } from './auth.js';
 import { BotBox } from './bot.js';
 import { createAutoFinish } from './progress.js';
-import { effectiveState, libraryFields } from './model.js';
+import { effectiveState, libraryFields, splitArrivals, defaultView } from './model.js';
+import { ModeViews } from './modes.js';
+import { triageDecision, undoDecision } from './triage.js';
 
 const $ = selector => document.querySelector(selector);
 let clock = Date.now();
@@ -19,6 +21,7 @@ const text = (tag, value, className) => {
 let store, libraryItems = [], state = {}, active = null, notes = emptyNotes(), bot = '';
 let openVersion = 0, connectionVersion = 0, query = '', tag = '', starredOnly = false, searchVersion = 0;
 let progressFilter = '', withNotes = false, shortOnly = false, sourceFilter = '';
+let mode = 'library', queue = { queue: [], arrivals_since: '' };
 let positionTimer = null, pendingPosition = null, lastPositionSave = 0;
 let articleReady = false;
 let bodies = new Map(), searchIndex = new Map(), notesCache = new Map(), summaries = new Map();
@@ -53,6 +56,10 @@ function notify(message, { undo, commit } = {}) {
 function handleError(error) { notify(error.message || String(error)); }
 const persist = promise => Promise.resolve(promise).catch(handleError);
 const library = new Library({ root: $('#library'), onOpen: openArticle, onStar: toggleStar, onProgress: chooseProgress, onTag: filterTag });
+const modes = new ModeViews({ root: $('#mode-content'), shelves: $('#shelves'),
+  onOpen: openArticle, onDecision: decide, onRemove: id => decide(id, 'remove'),
+  onReorder: ids => saveQueue({ ...queue, queue: ids }), onPile: startPile,
+  getBody: slug => store.getArticle(slug) });
 const pane = new NotesPane({ root: $('#notes-content'), onChange: value => {
   if (!active) return;
   notes.long_notes = value; notes.long_notes_updated_at = now(); saveNotes();
@@ -92,7 +99,22 @@ function items() {
     ...effectiveState(item, state[item.id]), notes: notesCache.get(item.slug) }));
 }
 function renderLibrary() {
-  library.render(items(), { activeId: active?.id, query, tag, starredOnly, progress: progressFilter,
+  const projected = items();
+  const { arrivals } = splitArrivals(projected, {}, queue.arrivals_since);
+  document.body.dataset.mode = mode;
+  for (const button of document.querySelectorAll('button[data-mode]')) {
+    const target = button.dataset.mode;
+    button.textContent = target === 'arrivals' ? `Arrivals (${arrivals.length})`
+      : target === 'queue' ? `Up next (${queue.queue.length}/10)` : 'Library';
+    button.setAttribute('aria-pressed', String(target === mode || (target === 'arrivals' && mode === 'pile')));
+  }
+  $('#library-toggle').setAttribute('aria-pressed', String(mode === 'library'));
+  $('.library-tools').hidden = mode !== 'library';
+  $('#library-scroll').hidden = mode !== 'library';
+  $('.sidebar-footer').hidden = mode !== 'library';
+  $('#mode-content').hidden = mode === 'library';
+  modes.render(mode, projected, { queue, arrivals_since: queue.arrivals_since, namespace: store?.namespace || 'locked', activeId: active?.id });
+  if (mode === 'library') library.render(projected, { activeId: active?.id, query, tag, starredOnly, progress: progressFilter,
     withNotes, shortOnly, source: sourceFilter, bodies: new Map([...searchIndex, ...bodies]) });
   $('#library-total').textContent = `${libraryItems.length} items`;
   $('#tag-filter').hidden = !tag; $('#tag-filter').textContent = `${tag} ×`;
@@ -102,12 +124,58 @@ function renderLibrary() {
 }
 function currentItem(id = active?.id) { return items().find(item => String(item.id) === String(id)); }
 function saveState() { persist(store.saveState(state)); renderLibrary(); updateReaderButtons(); }
+function saveQueue(value) {
+  queue = value;
+  persist(store.saveQueue(value));
+  renderLibrary();
+}
+function setMode(value) {
+  mode = value;
+  renderLibrary();
+  document.body.classList.remove('sidebar-collapsed');
+  closeDrawers();
+  if (mobile()) showDrawer('library');
+  if (value !== 'library') $('#mode-content').focus({ preventScroll: true });
+}
+function startPile() {
+  const pile = splitArrivals(items(), {}, queue.arrivals_since).pile;
+  modes.startPile(pile.sort((a, b) => Date.parse(a.added_at) - Date.parse(b.added_at)).slice(0, 20).map(item => item.id));
+  setMode('pile');
+}
+function decide(id, action) {
+  const item = currentItem(id), currentStore = store;
+  if (!item) return;
+  if (action === 'enqueue' && queue.queue.includes(item.id)) { notify('Already in Up next.'); return; }
+  const timestamp = now(), decision = triageDecision(currentItem(id), queue, action, timestamp);
+  if (!decision) { notify('Up next is full. Finish or remove one first.'); return; }
+  flushPosition();
+  state[id] = { ...state[id], ...decision.patch };
+  if (JSON.stringify(queue.queue) !== JSON.stringify(decision.queueAfter)) saveQueue({ ...queue, queue: decision.queueAfter });
+  saveState();
+  if (action === 'read') void openArticle(id, 'push', timestamp);
+  const labels = { 'up-next': 'Added to Up next', enqueue: 'Added to Up next', keep: 'Kept in library',
+    'let-go': 'Let go', read: 'Opened for reading', remove: 'Removed from Up next' };
+  notify(`${labels[action]} ·`, { undo: () => {
+    if (store !== currentStore) return;
+    const restored = undoDecision(currentItem(id), queue, decision);
+    if (!restored) return;
+    if (pendingPosition?.id === id) { pendingPosition = null; clearTimeout(positionTimer); }
+    state[id] = { ...state[id], ...restored.patch };
+    if (JSON.stringify(queue.queue) !== JSON.stringify(restored.queue.queue)) saveQueue(restored.queue);
+    modes.restoreCard(id);
+    if (action === 'read' && active?.id === id) closeArticle();
+    saveState();
+  } });
+}
 function setProgress(id, progress) {
   const item = currentItem(id); if (!item) return;
   if (pendingPosition?.id === id) flushPosition();
   const timestamp = now();
   state[item.id] = { ...state[item.id], progress, progress_changed_at: timestamp,
     triaged_at: item.triaged_at || (progress !== 'new' ? timestamp : null) };
+  if ((progress === 'finished' || progress === 'let_go') && queue.queue.includes(item.id)) {
+    saveQueue({ ...queue, queue: queue.queue.filter(value => value !== item.id) });
+  }
   saveState();
 }
 const autoFinish = new Map();
@@ -117,12 +185,16 @@ function tracker(id) {
 }
 function progressWithUndo(id, progress, message, undoProgress) {
   const before = currentItem(id), currentStore = store;
+  const beforeQueue = queue.queue.slice();
   if (!before || before.progress === progress) return;
   setProgress(id, progress);
   const changedAt = state[id].progress_changed_at;
   notify(message, { undo: () => {
     if (store !== currentStore || state[id]?.progress_changed_at !== changedAt) return;
     setProgress(id, undoProgress ? undoProgress() : before.progress);
+    state[id] = { ...state[id], triaged_at: before.triaged_at };
+    if (beforeQueue.includes(id)) saveQueue({ ...queue, queue: beforeQueue });
+    saveState();
   } });
 }
 function chooseProgress(id, progress) {
@@ -131,7 +203,8 @@ function chooseProgress(id, progress) {
 }
 function toggleRead() {
   const item = currentItem(); if (!item) return;
-  setProgress(item.id, item.progress === 'finished' ? 'reading' : 'finished');
+  const progress = item.progress === 'finished' ? 'reading' : 'finished';
+  progressWithUndo(item.id, progress, progress === 'finished' ? 'Marked finished ·' : 'Marked reading ·');
 }
 function toggleStar(id = active?.id) {
   const item = currentItem(id); if (!item) return;
@@ -141,7 +214,9 @@ function toggleStar(id = active?.id) {
 function updateReaderButtons() {
   const item = currentItem();
   $('#read-toggle').disabled = !item;
+  $('#read-toggle').hidden = !item;
   $('#reader-star').disabled = !item;
+  $('#reader-star').hidden = !item;
   $('#reader-more').hidden = !item;
   $('#progress-chip').hidden = !item;
   if (!item) return;
@@ -179,7 +254,7 @@ function deleteHighlight(highlight) {
     renderLibrary();
   } });
 }
-function filterTag(value) { tag = tag === value ? '' : value; renderLibrary(); showDrawer('library'); }
+function filterTag(value) { tag = tag === value ? '' : value; setMode('library'); }
 function externalLink(label, href) {
   try {
     const url = new URL(href);
@@ -249,7 +324,7 @@ function articleSlug() {
   const match = location.hash.match(/^#(?:demo&)?article=(.*)$/);
   return match ? decodeURIComponent(match[1]) : '';
 }
-async function openArticle(id, navigation = 'push') {
+async function openArticle(id, navigation = 'push', openingTime = null) {
   const item = currentItem(id) || items().find(item => item.slug === id);
   if (!item) { notify('That article is not in this library.'); return; }
   if (active?.id === item.id && articleReady) return;
@@ -264,7 +339,7 @@ async function openArticle(id, navigation = 'push') {
   const hash = `#${store.demo ? 'demo&' : ''}article=${encodeURIComponent(item.slug)}`;
   if (navigation === 'replace') history.replaceState(null, '', hash);
   else if (navigation === 'push' && location.hash !== hash) history.pushState(null, '', hash);
-  const timestamp = now();
+  const timestamp = openingTime || now();
   state[item.id] = { ...state[item.id], last_opened_at: timestamp };
   if (item.progress === 'new') setProgress(item.id, 'reading');
   else saveState();
@@ -303,7 +378,8 @@ async function connect(settings = getSettings()) {
   store?.dispose();
   store = new ReadingStore(settings); const currentStore = store;
   autoFinish.clear(); syncedAt = null;
-  libraryItems = []; state = {}; active = null; bodies = new Map(); searchIndex = new Map(); notesCache = new Map(); summaries = new Map();
+  libraryItems = []; state = {}; active = null; mode = 'library'; queue = { queue: [], arrivals_since: '' };
+  bodies = new Map(); searchIndex = new Map(); notesCache = new Map(); summaries = new Map();
   $('#mode-badge').textContent = settings.token ? 'PRIVATE' : 'DEMO';
   store.addEventListener('change', event => {
     if (store !== currentStore) return;
@@ -315,6 +391,10 @@ async function connect(settings = getSettings()) {
   store.addEventListener('state-updated', event => {
     if (store !== currentStore) return;
     state = event.detail.state; renderLibrary(); updateReaderButtons();
+  });
+  store.addEventListener('queue-updated', event => {
+    if (store !== currentStore) return;
+    queue = event.detail.queue; renderLibrary();
   });
   store.addEventListener('notes-updated', event => {
     if (store !== currentStore) return;
@@ -347,6 +427,8 @@ async function connect(settings = getSettings()) {
     const initial = await store.init();
     if (version !== connectionVersion) return;
     libraryItems = initial.library; state = initial.state || {};
+    queue = initial.queue;
+    mode = defaultView(queue.queue, splitArrivals(libraryItems, state, queue.arrivals_since).arrivals);
     const sourceSelect = $('#source-filter');
     sourceSelect.replaceChildren(new Option('All sources', ''));
     for (const label of [...new Set(libraryItems.map(item => libraryFields(item).source_label).filter(Boolean))].sort()) {
@@ -355,7 +437,8 @@ async function connect(settings = getSettings()) {
     sourceSelect.value = sourceFilter;
     renderLibrary();
     const slug = articleSlug();
-    const first = libraryItems.find(item => item.slug === slug);
+    const first = libraryItems.find(item => item.slug === slug)
+      || (!slug && store.demo && mode === 'queue' ? libraryItems.find(item => item.id === queue.queue[0]) : null);
     if (first) await openArticle(first.id, 'replace');
     else {
       $('#article-header').replaceChildren(text('h1', libraryItems.length ? 'Choose something to read.' : 'A quiet place to read.'));
@@ -387,6 +470,7 @@ async function disconnect() {
   flushPosition();
   const previous = store; store = null;
   active = null; articleReady = false; libraryItems = []; state = {}; notes = emptyNotes(); bot = '';
+  queue = { queue: [], arrivals_since: '' }; mode = 'library';
   bodies.clear(); searchIndex.clear(); notesCache.clear(); summaries.clear();
   query = ''; tag = ''; starredOnly = false; progressFilter = ''; withNotes = false; shortOnly = false; sourceFilter = '';
   $('#search').value = ''; $('#search-status').textContent = ''; $('#progress-filter').value = ''; $('#source-filter').value = '';
@@ -436,6 +520,8 @@ $('#tag-filter').addEventListener('click', () => { tag = ''; renderLibrary(); })
 $('#read-toggle').addEventListener('click', toggleRead);
 $('#reader-star').addEventListener('click', () => toggleStar());
 $('#let-go').addEventListener('click', () => { $('#reader-more').open = false; chooseProgress(active?.id, 'let_go'); });
+$('#up-next').addEventListener('click', () => { $('#reader-more').open = false; decide(active?.id, 'enqueue'); });
+document.querySelectorAll('button[data-mode]').forEach(button => button.addEventListener('click', () => setMode(button.dataset.mode)));
 function flushPosition() {
   clearTimeout(positionTimer); positionTimer = null;
   if (!pendingPosition || !store) return;
@@ -509,7 +595,7 @@ function showDrawer(which) {
   $('#sidebar').inert = which !== 'library';
   $('#notes-pane').inert = which !== 'notes';
   $('#reader-pane').inert = true;
-  if (which === 'library') $('#search').focus();
+  if (which === 'library') { if (mode === 'library') $('#search').focus(); else $('#mode-content').focus({ preventScroll: true }); }
   else pane.focus();
 }
 function closeDrawers() {
@@ -523,6 +609,7 @@ function closeDrawers() {
   if (restoreFocus) $('#reader-pane').focus({ preventScroll: true });
 }
 $('#library-toggle').addEventListener('click', () => {
+  if (mode !== 'library') { setMode('library'); return; }
   if (mobile()) { if (document.body.classList.contains('library-open')) closeDrawers(); else showDrawer('library'); }
   else { document.body.classList.toggle('sidebar-collapsed'); closeDrawers(); }
 });
@@ -623,12 +710,21 @@ function closeArticle(navigation = 'push') {
   if (navigation === 'push') history.pushState(null, '', store?.demo ? '#demo' : location.pathname + location.search);
   renderLibrary(); updateReaderButtons();
   if (mobile()) showDrawer('library');
-  else { document.body.classList.remove('sidebar-collapsed'); closeDrawers(); library.move(0); }
+  else {
+    document.body.classList.remove('sidebar-collapsed'); closeDrawers();
+    if (mode === 'library') library.move(0); else $('#mode-content').focus({ preventScroll: true });
+  }
 }
 document.addEventListener('keydown', e => {
   if (access.blocked || access.busy || e.defaultPrevented || e.isComposing) return;
   const editing = e.target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="textbox"]');
-  if (editing || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (editing || e.ctrlKey || e.metaKey) return;
+  if (e.altKey) {
+    if (mode === 'queue' && !document.querySelector('dialog[open]') && $('#more-menu').hidden && ['ArrowUp', 'ArrowDown'].includes(e.key)) {
+      e.preventDefault(); modes.reorderFocused(e.key === 'ArrowUp' ? -1 : 1);
+    }
+    return;
+  }
   if (e.key === 'Escape') {
     if (document.querySelector('dialog[open]')) return;
     e.preventDefault();
@@ -643,18 +739,25 @@ document.addEventListener('keydown', e => {
     return;
   }
   if (document.querySelector('dialog[open]') || !$('#more-menu').hidden) return;
+  if ((mode === 'arrivals' || mode === 'pile') && !e.target.closest('#reader-pane, #notes-pane')) {
+    const key = e.key.toLowerCase();
+    if (['u', 'k', 'l'].includes(key)) { e.preventDefault(); modes.decide(key); return; }
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); modes.move(e.key === 'ArrowLeft' ? -1 : 1); return; }
+    if (e.key === 'Enter' && !e.target.closest('button,a,summary')) { e.preventDefault(); modes.openFocused(); return; }
+  }
+  if (mode === 'queue' && e.key.toLowerCase() === 'x') { e.preventDefault(); modes.removeFocused(); return; }
   const move = delta => {
     if (mobile()) showDrawer('library');
     else { document.body.classList.remove('sidebar-collapsed'); closeDrawers(); }
-    library.move(delta);
+    if (mode === 'library') library.move(delta); else modes.move(delta);
   };
   const actions = {
     j: () => move(1), k: () => move(-1), r: toggleRead, s: () => toggleStar(),
     h: () => reader.highlight(), n: () => { showDrawer('notes'); pane.focus(); },
-    '/': () => { if (!mobile()) { document.body.classList.remove('sidebar-collapsed'); closeDrawers(); } showDrawer('library'); $('#search').focus(); }, '?': showHelp
+    '/': () => { setMode('library'); $('#search').focus(); }, '?': showHelp
   };
-  if (e.key === 'Enter' && (!e.target.closest('button,a,summary') || e.target.matches('.library-title'))) {
-    e.preventDefault(); library.openFocused();
+  if (e.key === 'Enter' && (!e.target.closest('button,a,summary') || e.target.matches('.library-title, .queue-open'))) {
+    e.preventDefault(); if (mode === 'library') library.openFocused(); else modes.openFocused();
   } else if (actions[e.key]) { e.preventDefault(); actions[e.key](); }
 });
 function restoreArticle() {

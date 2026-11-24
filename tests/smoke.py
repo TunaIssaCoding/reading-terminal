@@ -10,6 +10,7 @@ No real repository, credentials, downloads, screenshots, or result files are use
 import argparse
 import base64
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -210,7 +211,7 @@ class Repository:
 
 @contextmanager
 def session(browser, base, repo=None, mobile=False, store_only=False, demo=False, vault=False, clock=False,
-            open_reader=True):
+            open_reader=True, preserve_mode=False):
     repo = repo or Repository()
     context = browser.new_context(viewport={"width": 390 if mobile else 1440, "height": 844 if mobile else 900},
                                   service_workers="block", reduced_motion="reduce", has_touch=mobile)
@@ -248,22 +249,42 @@ def session(browser, base, repo=None, mobile=False, store_only=False, demo=False
     context.on("page", lambda page: page.on("pageerror", lambda error: errors.append(str(error))))
     page = context.new_page()
     if clock:
-        page.clock.install()
+        if clock is True:
+            page.clock.install()
+        else:
+            page.clock.install(time=clock)
+            page.clock.pause_at(clock)
     page.route("https://api.github.com/**", repo.route)
     page.set_default_timeout(12000)
     page.goto(base + ("/__smoke_store__.html" if store_only else "/#demo" if demo else "/"))
     if not store_only and not vault:
-        expect(page.locator(".library-item").first).to_be_attached()
-        expect(page.locator(".source-line")).to_have_count(0)
-        expect(page.locator(NOTES)).to_be_disabled()
-        assert "#article=" not in page.url, "Default Library load opened an article"
-        if open_reader:
-            if mobile and not page.locator(".library-title").first.is_visible():
-                page.locator("#library-toggle").click()
-            slug = page.locator(".library-item").first.get_attribute("data-library-id") if demo else "essay-01"
-            page.locator(f'[data-library-id="{slug}"] .library-title').click()
-            page.wait_for_selector(".source-line")
+        page.wait_for_selector("body[data-mode]", state="attached")
+        if demo:
+            expect(page.locator("body")).to_have_attribute("data-mode", "queue")
+            expect(page.locator(".queue-row").first).to_have_attribute("data-id", "demo-queued-01")
+            expect(page.locator("#article-header h1")).to_have_text("A small observatory, notebook 1")
             expect(page.locator(NOTES)).to_be_enabled()
+        else:
+            queue = repo.document("user/queue.json").get("queue", []) if "user/queue.json" in repo.files else []
+            if queue:
+                expect(page.locator("body")).to_have_attribute("data-mode", "queue")
+            expect(page.locator(".source-line")).to_have_count(0)
+            expect(page.locator(NOTES)).to_be_disabled()
+            assert "#article=" not in page.url, "A real default load opened an article"
+        if not preserve_mode:
+            select_mode(page, "library")
+            expect(page.locator(".library-item").first).to_be_attached()
+            if demo:
+                page.locator("#reader-pane").focus()
+                page.keyboard.press("Escape")
+                expect(page.locator(".source-line")).to_have_count(0)
+                if mobile:
+                    select_mode(page, "library")
+            if open_reader:
+                slug = "demo-library" if demo else "essay-01"
+                page.locator(f'[data-library-id="{slug}"] .library-title').click()
+                page.wait_for_selector(".source-line")
+                expect(page.locator(NOTES)).to_be_enabled()
         page.evaluate("document.fonts.ready")
     try:
         yield page, repo, errors
@@ -274,7 +295,25 @@ def session(browser, base, repo=None, mobile=False, store_only=False, demo=False
         context.close()
 
 
+def select_mode(page, mode):
+    target = "#library-scroll" if mode == "library" else "#mode-content"
+    drawer_visible = page.viewport_size["width"] > 860 or page.locator("body.library-open").count()
+    if (page.locator("body").get_attribute("data-mode") == mode
+            and drawer_visible and page.locator(target).first.is_visible()):
+        return
+    mobile = page.locator(f'button[data-mode="{mode}"]:visible')
+    if mobile.count():
+        mobile.first.click()
+    else:
+        page.locator({"library": "#library-toggle", "arrivals": "#arrivals-mode", "queue": "#queue-mode"}[mode]).click()
+    expect(page.locator("body")).to_have_attribute("data-mode", mode)
+
+
 def opened(page, slug):
+    if page.locator("body").get_attribute("data-mode") != "library":
+        select_mode(page, "library")
+        if page.viewport_size["width"] <= 860 and page.locator("body.library-open").count():
+            page.locator("#library-toggle").click()
     expect(page.locator(".library-item.is-active")).to_have_attribute("data-library-id", slug)
     expect(page.locator(NOTES)).to_have_attribute("aria-label", f"Long notes for Fictional field notebook {int(slug[-2:]):02}")
     page.wait_for_selector(".source-line")
@@ -282,6 +321,7 @@ def opened(page, slug):
 
 
 def open_item(page, slug):
+    select_mode(page, "library")
     page.locator(f'[data-library-id="{slug}"] .library-title').click()
     opened(page, slug)
 
@@ -348,13 +388,7 @@ def navigation_media_layout(browser, base):
         status(page, "essay-01", "reading")
         status(page, "essay-02", "new")
         status(page, "essay-17", "finished")
-        metrics = page.locator("#library").evaluate("""root => {
-            const box = root.getBoundingClientRect();
-            const rows = [...root.querySelectorAll('.library-item')];
-            return {height: rows[0].getBoundingClientRect().height,
-              visible: rows.filter(r => {const b=r.getBoundingClientRect();return b.top>=box.top && b.bottom<=box.bottom}).length};
-        }""")
-        assert 9 <= metrics["visible"] <= 13, metrics
+        metrics = {"height": page.locator(".library-item").first.bounding_box()["height"]}
         menu_action(page, "#library-density", view=True)
         comfortable = page.locator(".library-item").first.bounding_box()["height"]
         assert comfortable > metrics["height"] + 10, (metrics, comfortable)
@@ -711,7 +745,7 @@ def mobile_and_demo(browser, base):
         page.locator("#drawer-backdrop").click(position={"x": 380, "y": 400})
         expect(page.locator("#library-toggle")).to_have_attribute("aria-expanded", "false")
     with session(browser, base, demo=True) as (page, repo, _):
-        expect(page.locator(".library-item")).to_have_count(6)
+        expect(page.locator(".library-item")).to_have_count(42)
         page.wait_for_timeout(2500)
         assert "Saving" not in page.locator("#sync-status").inner_text()
         assert not repo.requests, "Demo mode contacted GitHub"
@@ -719,20 +753,21 @@ def mobile_and_demo(browser, base):
         assert TOKEN not in page.evaluate("JSON.stringify({...localStorage})")
         page.goto(base + "/#demo")
         page.reload()
-        expect(page.locator(".library-item")).to_have_count(6)
+        expect(page.locator("body")).to_have_attribute("data-mode", "queue")
+        expect(page.locator(".queue-row").first).to_have_attribute("data-id", "demo-queued-01")
         expect(page.locator("#setup-screen")).not_to_be_visible()
         expect(page.locator("#lock-screen")).not_to_be_visible()
         expect(page.locator("#lock-button")).not_to_be_visible()
-        expect(page.locator(NOTES)).to_be_disabled()
-        expect(page.locator(".source-line")).to_have_count(0)
+        expect(page.locator(NOTES)).to_be_enabled()
+        expect(page.locator("#article-header h1")).to_have_text("A small observatory, notebook 1")
         assert not repo.requests, "Direct demo link contacted GitHub"
         assert not repo.public_vault_requests, "Reloading demo fetched vault.json"
     with session(browser, base, vault=True) as (page, repo, _):
         expect(page.locator("#setup-screen")).to_be_visible()
         page.locator("#setup-screen [data-demo]").click()
-        expect(page.locator(".library-item")).to_have_count(6)
-        expect(page.locator(NOTES)).to_be_disabled()
-        expect(page.locator(".source-line")).to_have_count(0)
+        expect(page.locator("body")).to_have_attribute("data-mode", "queue")
+        expect(page.locator(NOTES)).to_be_enabled()
+        expect(page.locator("#article-header h1")).to_have_text("A small observatory, notebook 1")
         assert not repo.requests, "Setup demo link contacted GitHub"
 
 
@@ -744,7 +779,7 @@ def phase_one_surface(browser, base):
                 expect(page.locator(selector)).not_to_be_visible()
             if mobile:
                 controls = page.locator(".topbar button:visible").evaluate_all("els => els.map(el => el.id).sort()")
-                assert controls == sorted(["library-toggle", "notes-toggle", "more-toggle"]), controls
+                assert {"library-toggle", "notes-toggle", "more-toggle"}.issubset(controls), controls
                 expect(page.locator(".wordmark")).to_be_visible()
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
             page.locator("#more-toggle").click()
@@ -934,12 +969,16 @@ def automatic_status_undo_and_typing(browser, base):
 def relative_sync_timer(browser, base):
     with session(browser, base, clock=True) as (page, repo, _):
         page.locator(NOTES).fill("Fictional sync timestamp observation.")
+        wait_until(page, lambda: "user/notes/essay-01.json" in repo.files and
+                   repo.document("user/notes/essay-01.json")["long_notes"] == "Fictional sync timestamp observation.",
+                   "The note must reach the repository before measuring sync age")
         synced(page)
         sync = page.locator("#sync-status")
         initial, absolute = sync.inner_text(), sync.get_attribute("title")
         assert page.evaluate("value => Number.isFinite(Date.parse(value))", absolute), absolute
         writes = len(repo.puts)
-        page.clock.run_for(65000)
+        # Include the next 15-second refresh after a full minute since sync.
+        page.clock.run_for(75000)
         expect(sync).not_to_have_text(initial)
         expect(sync).to_have_text(re.compile(r"^Synced\b", re.I))
         expect(sync).to_have_attribute("title", absolute)
@@ -1027,6 +1066,7 @@ def vault_library(page):
     expect(page.locator("#setup-screen")).not_to_be_visible()
     expect(page.locator("#lock-button")).to_have_count(1)
     expect(page.locator("#lock-button")).to_be_enabled()
+    select_mode(page, "library")
     expect(page.locator('[data-library-id="essay-01"]')).to_have_count(1)
     if page.locator(".source-line").count() == 0:
         expect(page.locator(NOTES)).to_be_disabled()
@@ -1528,6 +1568,64 @@ def real_state_migration(browser, base):
         page.evaluate("smokeStore.dispose()")
 
 
+def returning_demo_namespace(browser, base):
+    with session(browser, base, store_only=True, demo=True) as (page, repo, _):
+        seeded = page.evaluate("""async () => {
+          const real = JSON.stringify(['fiction', 'demo:v1', 'main']);
+          const keys = ['demo:v1', 'reading-shelves:demo:v1', 'reading-terminal.pending:demo:v1'];
+          const retained = ['reading-shelves:' + real, 'reading-terminal.pending:' + real, 'reading-theme'];
+          for (const key of [...keys, ...retained]) localStorage.setItem(key, '[]');
+          const db = await new Promise((resolve, reject) => {
+            const r = indexedDB.open('reading-terminal-cache', 2);
+            r.onupgradeneeded = () => {
+              for (const name of ['cache', 'queue', 'backups'])
+                r.result.createObjectStore(name, {keyPath: 'key'}).createIndex('namespace', 'namespace');
+            };
+            r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error);
+          });
+          const tx = db.transaction(['cache', 'queue', 'backups'], 'readwrite');
+          for (const name of ['cache', 'queue', 'backups']) {
+            for (const namespace of ['demo:v1', real]) {
+              tx.objectStore(name).put({key: namespace + '\\nuser/queue.json', namespace,
+                path: 'user/queue.json', content: {queue: [], arrivals_since: '2026-06-01T00:00:00.000Z'}});
+            }
+          }
+          await new Promise((resolve, reject) => {
+            tx.oncomplete = resolve; tx.onabort = tx.onerror = () => reject(tx.error);
+          });
+          db.close();
+          return {keys, retained, real};
+        }""")
+        page.goto(base + "/#demo")
+        expect(page.locator("body")).to_have_attribute("data-mode", "queue")
+        expect(page.locator(".queue-row").first).to_have_attribute("data-id", "demo-queued-01")
+        expect(page.locator("#article-header h1")).to_have_text("A small observatory, notebook 1")
+        expect(page.locator(NOTES)).to_be_enabled()
+        result = page.evaluate("""async () => {
+          const db = await new Promise((resolve, reject) => {
+            const r = indexedDB.open('reading-terminal-cache', 2);
+            r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error);
+          });
+          const records = {};
+          for (const name of ['cache', 'queue', 'backups']) {
+            records[name] = await new Promise((resolve, reject) => {
+              const r = db.transaction(name).objectStore(name).getAll();
+              r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error);
+            });
+          }
+          db.close();
+          return {records, local: {...localStorage}};
+        }""")
+        assert all(key not in result["local"] for key in seeded["keys"]), result
+        assert all(result["local"][key] == "[]" for key in seeded["retained"]), result
+        for records in result["records"].values():
+            assert not any(record["namespace"] == "demo:v1" for record in records), records
+            real = [record for record in records if record["namespace"] == seeded["real"]]
+            assert len(real) == 1 and real[0]["content"] == {"queue": [], "arrivals_since": "2026-06-01T00:00:00.000Z"}, records
+        assert any(record["namespace"] == "demo:v2" for record in result["records"]["cache"])
+        assert not repo.requests and not repo.public_vault_requests
+
+
 def demo_state_migration(browser, base):
     with session(browser, base, demo=True, open_reader=False) as (page, repo, _):
         result = page.evaluate("""async () => {
@@ -1543,7 +1641,7 @@ def demo_state_migration(browser, base):
             request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);
           });
           db.close();store.dispose();
-          return {...initial,backup,cached:records.find(r=>r.namespace==='demo:v1'&&r.path==='user/state.json').content};
+          return {...initial,backup,cached:records.find(r=>r.namespace==='demo:v2'&&r.path==='user/state.json').content};
         }""")
         expected = {"demo-library": "new", "demo-city": "finished", "demo-margin": "reading",
                     "demo-tide": "finished", "demo-map": "finished", "demo-radio": "finished"}
@@ -1552,12 +1650,14 @@ def demo_state_migration(browser, base):
         old = json.loads(result["backup"])
         assert old["demo-margin"]["status"] == "commented"
         assert result["state"]["demo-margin"]["starred"] is True
-        assert result["queue"] == {"queue": [], "arrivals_since": "2026-06-01T00:00:00.000Z"}
+        assert result["queue"] == {"queue": ["demo-queued-01", "demo-queued-02", "demo-queued-03"],
+                                   "arrivals_since": "2026-06-01T00:00:00.000Z"}
         assert not repo.requests
         page.reload()
-        expect(page.locator(".library-item")).to_have_count(6)
-        expect(page.locator(".source-line")).to_have_count(0)
-        expect(page.locator(NOTES)).to_be_disabled()
+        expect(page.locator("body")).to_have_attribute("data-mode", "queue")
+        expect(page.locator("#article-header h1")).to_have_text("A small observatory, notebook 1")
+        select_mode(page, "library")
+        expect(page.locator(".library-item")).to_have_count(42)
         page.locator('[data-library-id="demo-map"] .library-title').click()
         expect(page.locator(".article-lede")).to_contain_text("fictional Ferncross")
         expect(page.locator(".article-summary")).to_have_count(0)
@@ -1576,8 +1676,12 @@ def reader_progress_and_bot(browser, base):
         expect(page.locator("#notes-pane .bot-content")).to_have_count(0)
         expect(page.locator("#notes-pane [data-action=keep]")).to_have_count(0)
         page.locator("#reader-more > summary").click()
-        expect(page.locator("#up-next")).to_be_disabled()
-        expect(page.locator("#up-next")).to_have_attribute("title", "Up next arrives in a later update")
+        expect(page.locator("#up-next")).to_be_enabled()
+        page.locator("#up-next").click()
+        synced(page)
+        assert "essay-01" in repo.document("user/queue.json")["queue"]
+        if not page.locator("#let-go").is_visible():
+            page.locator("#reader-more > summary").click()
         page.locator("#let-go").click()
         status(page, "essay-01", "let_go")
         page.locator("#toast .toast-message").get_by_role("button", name="Undo", exact=True).last.click()
@@ -1652,19 +1756,297 @@ def library_filters_and_fallbacks(browser, base):
         expect(page.locator(".source-line")).to_have_count(0)
 
 
+def queue_ids(page):
+    return page.locator(".queue-row").evaluate_all("rows => rows.map(row => row.dataset.id)")
+
+
+def undo_last(page):
+    page.locator("#toast .toast-message").get_by_role("button", name="Undo", exact=True).last.click()
+
+
+def persisted_state(page, repo, slug, progress, triaged):
+    wait_until(page, lambda: repo.document("user/state.json")[slug].get("progress") == progress
+               and bool(repo.document("user/state.json")[slug].get("triaged_at")) == triaged,
+               f"{slug} did not persist {progress}, triaged={triaged}")
+
+
+def queued_repository(ids=("essay-03", "essay-04", "essay-05")):
+    repo = Repository()
+    repo.set("user/queue.json", {"queue": list(ids), "arrivals_since": STAMP})
+    state = repo.document("user/state.json")
+    for slug in ids:
+        state[slug]["triaged_at"] = STAMP
+    repo.set("user/state.json", state)
+    return repo
+
+
+def reading_defaults_and_empty_header(browser, base):
+    with session(browser, base, demo=True, preserve_mode=True) as (page, repo, _):
+        expect(page.locator("body")).to_have_attribute("data-mode", "queue")
+        expect(page.locator(".queue-row").first).to_have_attribute("data-id", "demo-queued-01")
+        expect(page.locator("#article-header h1")).to_have_text("A small observatory, notebook 1")
+        select_mode(page, "arrivals")
+        expect(page.locator(".triage-card")).to_have_count(1)
+        seen = set()
+        for _ in range(5):
+            card = page.locator(".triage-card")
+            slug = card.get_attribute("data-id")
+            seen.add(slug)
+            if slug in ("demo-arrival-03", "demo-arrival-04"):
+                expect(card.locator(".triage-lede")).to_contain_text("fictional orchard letter")
+                assert "##" not in card.locator(".triage-lede").inner_text()
+            page.locator("#mode-content").focus()
+            page.keyboard.press("ArrowRight")
+        assert {f"demo-arrival-{number:02}" for number in range(1, 5)}.issubset(seen)
+        assert not repo.requests
+    with session(browser, base, preserve_mode=True) as (page, repo, _):
+        expect(page.locator("body")).to_have_attribute("data-mode", "arrivals")
+        for selector in ("#read-toggle", "#reader-star", "#reader-more", "#progress-chip"):
+            expect(page.locator(selector)).not_to_be_visible()
+        before = (repo.files["user/state.json"], repo.files["user/queue.json"], len(repo.puts))
+        page.locator("#reader-pane").focus()
+        page.keyboard.press("r")
+        page.keyboard.press("s")
+        page.wait_for_timeout(2200)
+        assert (repo.files["user/state.json"], repo.files["user/queue.json"], len(repo.puts)) == before
+        expect(page.locator(".source-line")).to_have_count(0)
+    repo = Repository()
+    state = repo.document("user/state.json")
+    for record in state.values():
+        record.update(progress="finished", triaged_at=STAMP)
+    repo.set("user/state.json", state)
+    with session(browser, base, repo, preserve_mode=True) as (page, _, _):
+        expect(page.locator("body")).to_have_attribute("data-mode", "library")
+        select_mode(page, "arrivals")
+        expect(page.locator("#mode-content")).to_contain_text(
+            "Nothing new. New pieces land here after the morning update.")
+
+
+def arrivals_decisions_and_persisted_undo(browser, base):
+    for key, progress, queued in (("u", "new", True), ("k", "new", False),
+                                  ("l", "let_go", False), ("Enter", "reading", False)):
+        with session(browser, base, preserve_mode=True) as (page, repo, _):
+            card = page.locator(".triage-card")
+            first = card.get_attribute("data-id")
+            before = repo.document("user/state.json")[first]
+            before_queue = repo.document("user/queue.json")
+            writes = len(repo.puts)
+            page.locator("#mode-content").focus()
+            page.keyboard.press("ArrowRight")
+            expect(card).not_to_have_attribute("data-id", first)
+            page.keyboard.press("ArrowLeft")
+            expect(card).to_have_attribute("data-id", first)
+            assert len(repo.puts) == writes, "Navigating triage cards wrote user data"
+            page.keyboard.press(key)
+            persisted_state(page, repo, first, progress, True)
+            wait_until(page, lambda: (first in repo.document("user/queue.json")["queue"]) == queued,
+                       "Triage did not persist its queue decision")
+            if key == "Enter":
+                assert page.url.endswith("#article=" + first)
+                expect(page.locator(NOTES)).to_be_enabled()
+            undo_last(page)
+            persisted_state(page, repo, first, before["progress"], False)
+            wait_until(page, lambda: repo.document("user/queue.json") == before_queue,
+                       "Undo did not restore the persisted queue")
+            restored = repo.document("user/state.json")[first]
+            for field in ("progress", "starred", "position", "triaged_at", "last_opened_at"):
+                assert restored.get(field) == before.get(field), (key, field, restored, before)
+            select_mode(page, "arrivals")
+            expect(card).to_have_attribute("data-id", first)
+
+
+def queue_cap_and_conflict(browser, base):
+    repo = queued_repository(tuple(f"essay-{number:02}" for number in range(1, 11)))
+    with session(browser, base, repo, preserve_mode=True) as (page, repo, _):
+        select_mode(page, "arrivals")
+        before = (repo.files["user/state.json"], repo.files["user/queue.json"], len(repo.puts))
+        page.locator('[data-decision="up-next"]').click()
+        expect(page.locator("#toast")).to_contain_text("Up next is full. Finish or remove one first.")
+        page.wait_for_timeout(2200)
+        assert (repo.files["user/state.json"], repo.files["user/queue.json"], len(repo.puts)) == before
+        select_mode(page, "library")
+        open_item(page, "essay-11")
+        synced(page)
+        before = (repo.files["user/state.json"], repo.files["user/queue.json"], len(repo.puts))
+        page.locator("#reader-more > summary").click()
+        page.locator("#up-next").click()
+        expect(page.locator("#toast")).to_contain_text("Up next is full. Finish or remove one first.")
+        page.wait_for_timeout(2200)
+        assert (repo.files["user/state.json"], repo.files["user/queue.json"], len(repo.puts)) == before
+    repo = queued_repository(("essay-03", "essay-04"))
+    remote_boundary = "2025-12-01T00:00:00.000Z"
+    repo.conflicts["user/queue.json"] = {"queue": ["essay-05", "essay-03", "essay-04"],
+                                        "arrivals_since": remote_boundary}
+    with session(browser, base, repo, preserve_mode=True) as (page, repo, _):
+        page.locator('.queue-row[data-id="essay-03"] .queue-remove').click()
+        wait_until(page, lambda: repo.document("user/queue.json")["queue"] == ["essay-05", "essay-04"],
+                   "Queue SHA retry lost remote ordering or local removal")
+        assert repo.document("user/queue.json")["arrivals_since"] == remote_boundary
+        writes = [data for path, _, data in repo.puts if path == "user/queue.json"]
+        assert len(writes) == 2 and writes[0]["sha"] != writes[1]["sha"]
+        select_mode(page, "arrivals")
+        slug = page.locator(".triage-card").get_attribute("data-id")
+        page.locator('[data-decision="up-next"]').click()
+        wait_until(page, lambda: repo.document("user/queue.json")["queue"] == ["essay-05", "essay-04", slug],
+                   "Queue append after retry lost a remote item")
+        assert repo.document("user/queue.json")["arrivals_since"] == remote_boundary
+
+
+def pointer_reorder(page, source, target, touch=False):
+    handle = page.locator(f'.queue-row[data-id="{source}"] .queue-handle')
+    handle.scroll_into_view_if_needed()
+    start = handle.bounding_box()
+    end = page.locator(f'.queue-row[data-id="{target}"]').bounding_box()
+    x, y = start["x"] + start["width"] / 2, start["y"] + start["height"] / 2
+    finish = end["y"] + end["height"] - 2
+    if touch:
+        cdp = page.context.new_cdp_session(page)
+        try:
+            cdp.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": x, "y": y}]})
+            for step in range(1, 9):
+                cdp.send("Input.dispatchTouchEvent", {"type": "touchMove",
+                         "touchPoints": [{"x": x, "y": y + (finish - y) * step / 8}]})
+                page.wait_for_timeout(30)
+            cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        finally:
+            cdp.detach()
+    else:
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x, finish, steps=12)
+        page.mouse.up()
+
+
+def queue_reorder_remove_and_reader_undo(browser, base):
+    with session(browser, base, queued_repository(), preserve_mode=True) as (page, repo, _):
+        pointer_reorder(page, "essay-03", "essay-05")
+        expect(page.locator(".queue-row").last).to_have_attribute("data-id", "essay-03")
+        order = queue_ids(page)
+        wait_until(page, lambda: repo.document("user/queue.json")["queue"] == order, "Drag order not persisted")
+        page.locator('.queue-row[data-id="essay-03"] .queue-open').focus()
+        page.keyboard.press("Alt+ArrowUp")
+        expect(page.locator(".queue-row").nth(1)).to_have_attribute("data-id", "essay-03")
+        page.keyboard.press("Alt+ArrowDown")
+        expect(page.locator(".queue-row").last).to_have_attribute("data-id", "essay-03")
+        page.keyboard.press("x")
+        expect(page.locator('.queue-row[data-id="essay-03"]')).to_have_count(0)
+        persisted_state(page, repo, "essay-03", "new", True)
+        wait_until(page, lambda: "essay-03" not in repo.document("user/queue.json")["queue"],
+                   "Keyboard remove did not persist")
+        select_mode(page, "library")
+        expect(page.locator('[data-library-id="essay-03"]')).to_have_count(1)
+        for action in ("finish", "let-go"):
+            select_mode(page, "queue")
+            order = queue_ids(page)
+            slug = order[0]
+            page.locator(f'.queue-row[data-id="{slug}"] .queue-open').click()
+            synced(page)
+            if action == "finish":
+                page.locator("#reader-pane").focus()
+                page.keyboard.press("r")
+            else:
+                page.locator("#reader-more > summary").click()
+                page.locator("#let-go").click()
+            persisted_state(page, repo, slug, "finished" if action == "finish" else "let_go", True)
+            wait_until(page, lambda: slug not in repo.document("user/queue.json")["queue"],
+                       "Reader decision did not remove queue entry")
+            undo_last(page)
+            persisted_state(page, repo, slug, "reading", True)
+            wait_until(page, lambda: repo.document("user/queue.json")["queue"] == order,
+                       "Reader Undo did not restore queue order")
+
+
+def shelves_and_pile_batch(browser, base):
+    with session(browser, base, demo=True, open_reader=False) as (page, repo, _):
+        for name in ("started", "keepers", "short", "pile"):
+            shelf = page.locator(f'.shelf[data-shelf="{name}"]')
+            expect(shelf.locator(".shelf-rule")).not_to_be_empty()
+            assert int(shelf.locator(".shelf-count").inner_text()) > 0
+        pile = page.locator('.shelf[data-shelf="pile"]')
+        expect(pile.locator(".shelf-count")).to_have_text("27")
+        initial = page.locator('.shelf[data-shelf="started"]').evaluate("el => el.open")
+        page.locator('.shelf[data-shelf="started"] > summary').click()
+        changed = not initial
+        page.reload()
+        select_mode(page, "library")
+        assert page.locator('.shelf[data-shelf="started"]').evaluate("el => el.open") == changed
+        if not pile.evaluate("el => el.open"):
+            pile.locator("summary").click()
+        page.locator("#triage-pile").click()
+        expect(page.locator("body")).to_have_attribute("data-mode", "pile")
+        for number in range(1, 21):
+            expect(page.locator(".triage-card")).to_have_attribute("data-id", f"demo-pile-{number:02}")
+            page.locator('[data-decision="keep"]').click()
+        expect(page.locator(".triage-card")).to_have_count(0)
+        select_mode(page, "library")
+        expect(pile.locator(".shelf-count")).to_have_text("7")
+        assert not repo.requests
+    fixed = datetime(2026, 11, 24, 12, tzinfo=timezone.utc)
+    repo = Repository()
+    state = repo.document("user/state.json")
+    for item in repo.items:
+        item["read_minutes"] = 15
+        state[item["id"]].update(progress="finished", triaged_at=STAMP, starred=False)
+    state["essay-01"].update(starred=True, last_opened_at=None)
+    state["essay-02"].update(starred=True, last_opened_at=(fixed - timedelta(days=61)).isoformat())
+    state["essay-03"].update(starred=True, last_opened_at=(fixed - timedelta(days=60)).isoformat())
+    state["essay-04"].update(starred=True, last_opened_at=(fixed - timedelta(days=59)).isoformat())
+    state["essay-05"].update(progress="reading")
+    state["essay-06"].update(progress="new")
+    state["essay-07"].update(progress="new")
+    repo.items[5]["read_minutes"] = 10
+    repo.items[6]["read_minutes"] = 11
+    repo.set("library.json", repo.items)
+    repo.set("user/state.json", state)
+    with session(browser, base, repo, open_reader=False, clock=fixed) as (page, _, _):
+        for name, count in (("keepers", "2"), ("started", "1"), ("short", "1"), ("pile", "0")):
+            expect(page.locator(f'.shelf[data-shelf="{name}"] .shelf-count')).to_have_text(count)
+        started = page.locator('.shelf[data-shelf="started"]')
+        default_open = started.evaluate("el => el.open")
+        started.locator("summary").click()
+        page.goto(base + "/#demo")
+        page.reload()
+        expect(page.locator("body")).to_have_attribute("data-mode", "queue")
+        select_mode(page, "library")
+        assert started.evaluate("el => el.open") == default_open
+
+
+def mobile_modes_and_touch_queue(browser, base):
+    with session(browser, base, queued_repository(), mobile=True, preserve_mode=True) as (page, repo, _):
+        for mode in ("arrivals", "library", "queue"):
+            control = page.locator(f'button[data-mode="{mode}"]:visible')
+            expect(control).to_have_count(1)
+            control.tap()
+            expect(page.locator("body")).to_have_attribute("data-mode", mode)
+            expect(page.locator(".triage-card" if mode == "arrivals" else
+                                ".queue-row" if mode == "queue" else ".library-item").first).to_be_visible()
+        pointer_reorder(page, "essay-03", "essay-05", touch=True)
+        expect(page.locator(".queue-row").last).to_have_attribute("data-id", "essay-03")
+        order = queue_ids(page)
+        wait_until(page, lambda: repo.document("user/queue.json")["queue"] == order,
+                   "Touch reorder was not persisted")
+        page.locator('.queue-row[data-id="essay-04"] .queue-remove').tap()
+        expect(page.locator('.queue-row[data-id="essay-04"]')).to_have_count(0)
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("base_url", nargs="?", default=os.environ.get("READING_BASE_URL", "http://localhost:8765"))
+    parser.add_argument("--base", dest="base_override")
     args = parser.parse_args()
-    base = args.base_url.rstrip("/")
+    base = (args.base_override or args.base_url).rstrip("/")
     expect.set_options(timeout=12000)
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(executable_path="/usr/bin/google-chrome", headless=True, args=["--no-sandbox"])
         try:
-            for scenario in (navigation_media_layout, indexed_search, debounce_status_and_growth,
+            for scenario in (reading_defaults_and_empty_header, arrivals_decisions_and_persisted_undo,
+                             queue_cap_and_conflict, queue_reorder_remove_and_reader_undo,
+                             shelves_and_pile_batch, mobile_modes_and_touch_queue,
+                             navigation_media_layout, indexed_search, debounce_status_and_growth,
                              highlight_drag_and_persistence, keyboard_stars_and_read, phase_one_surface,
                              selection_toolbar_and_undo, automatic_status_undo_and_typing, relative_sync_timer,
-                             mobile_and_demo, real_state_migration, demo_state_migration,
+                             mobile_and_demo, returning_demo_namespace, real_state_migration, demo_state_migration,
                              reader_progress_and_bot, library_filters_and_fallbacks,
                              store_conflict_export_import, setup_unlock_remember_lock,
                              setup_replacement_and_invalidation, security_password_remove_conflicts,

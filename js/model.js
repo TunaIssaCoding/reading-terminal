@@ -73,7 +73,7 @@ export function migrateState(input, library = [], time = EPOCH) {
   return { state, changed };
 }
 
-/** Arrivals are untriaged new items received at or after the inclusive boundary. */
+/** Post-boundary arrivals are untriaged; the older pile also requires new progress. */
 export function splitArrivals(items, state = {}, arrivals_since) {
   const arrivals = [];
   const pile = [];
@@ -81,9 +81,42 @@ export function splitArrivals(items, state = {}, arrivals_since) {
   for (const item of items) {
     const current = effectiveState(item, state[item.id || item.slug]);
     const added = Date.parse(libraryFields(item).added_at);
-    if ((current.progress || 'new') !== 'new' || current.triaged_at ||
-        !Number.isFinite(added) || !Number.isFinite(threshold)) continue;
-    (added >= threshold ? arrivals : pile).push(item);
+    if (current.triaged_at || !Number.isFinite(added) || !Number.isFinite(threshold)) continue;
+    if (added >= threshold) arrivals.push(item);
+    else if (current.progress === 'new') pile.push(item);
   }
   return { arrivals, pile };
+}
+
+export function defaultView(queueIds, arrivals) {
+  // Phase 4 can insert the Edition default here.
+  return queueIds.length ? 'queue' : arrivals.length ? 'arrivals' : 'library';
+}
+
+export function pileThisWeek(items, state, arrivals_since, date = new Date()) {
+  const now = date.getTime();
+  const monday = new Date(now);
+  monday.setHours(0, 0, 0, 0);
+  monday.setDate(monday.getDate() - (monday.getDay() + 6) % 7);
+  const threshold = Date.parse(arrivals_since);
+  const current = splitArrivals(items, state, arrivals_since).pile.length;
+  let start = current;
+  for (const item of items) {
+    const added = Date.parse(libraryFields(item).added_at);
+    const triaged = Date.parse(effectiveState(item, state?.[item.id || item.slug]).triaged_at);
+    if (added < threshold && triaged >= monday.getTime() && triaged <= now) start += 1;
+  }
+  return { start, current };
+}
+
+export function libraryShelves(items, arrivals_since, date = new Date()) {
+  const shelves = { started: [], keepers: [], short: [], pile: splitArrivals(items, {}, arrivals_since).pile };
+  const cutoff = date.getTime() - 60 * 24 * 60 * 60 * 1000;
+  for (const item of items) {
+    const current = effectiveState(item);
+    if (current.progress === 'reading') shelves.started.push(item);
+    if (current.starred && (!current.last_opened_at || Date.parse(current.last_opened_at) < cutoff)) shelves.keepers.push(item);
+    if (current.progress === 'new' && libraryFields(item).read_minutes <= 10) shelves.short.push(item);
+  }
+  return shelves;
 }

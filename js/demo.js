@@ -219,5 +219,67 @@ export const demoState = {
   'demo-map': { status: 'commented', commented_from: null, starred: false, status_changed_at: '2026-06-21T11:00:00.000Z' },
   'demo-radio': { status: 'commented', starred: false, status_changed_at: '2026-06-23T17:00:00.000Z' },
 };
-export const demoQueue = { queue: [], arrivals_since: '2026-06-01T00:00:00.000Z' };
+// Additional fictional records exercise each Reading mode without changing legacy examples.
+for (let index = 1; index <= 3; index++) {
+  const id = `demo-queued-0${index}`;
+  demoLibrary.push({
+    id, slug: id, title: `A small observatory, notebook ${index}`,
+    author: 'Tavi Moss · fictional', source_type: 'essay', source_label: 'Cloudbank Journal',
+    created_at: '2026-06-25T09:00:00.000Z', added_at: '2026-06-25T09:00:00.000Z',
+    words: 920, read_minutes: 4, tags: ['Observation'],
+    summary: 'A fictional village observatory keeps patient records of changing clouds.', images: [],
+  });
+  demoArticles[id] = `## Notebook ${index}\n\nAt the fictional Cloudbank observatory, Tavi records the weather before offering an explanation.\n\nA useful observation leaves room for tomorrow to disagree. The group compares notes slowly, preserving the question beside each measurement.\n\nThe notebooks belong to an invented community. No private reading material is included in this example.`;
+  demoState[id] = { progress: 'new', starred: false, position: 0,
+    triaged_at: '2026-06-25T10:00:00.000Z', progress_changed_at: '2026-06-25T10:00:00.000Z',
+    last_opened_at: null };
+}
+for (let index = 1; index <= 4; index++) {
+  const id = `demo-arrival-0${index}`;
+  const article = {
+    id, slug: id, title: `Letters from an imaginary orchard ${index}`,
+    author: 'Wren Ash · fictional', source_type: 'field notes',
+    created_at: `2026-06-${25 + index}T09:00:00.000Z`, words: index * 300,
+    tags: ['Orchards', 'Attention'], images: [],
+  };
+  if (index === 1) {
+    article.source_label = 'Ferncross Letters';
+    article.summary = 'An invented orchard keeper notices that a shared question travels further than a fixed answer.';
+    article.lede = 'The first letter begins beside a fictional pear tree.';
+  } else if (index === 2) {
+    article.lede = 'A fictional orchard opens its notebook to a visitor with a different question.';
+  } else if (index === 3) {
+    article.source_label = 'Ferncross Letters';
+  }
+  demoLibrary.push(article);
+  demoArticles[id] = `## A letter worth opening\n\nThis fictional orchard letter ${index} records a quiet conversation about patient observation.\n\nWren sets a blank page beside the map, leaving space for the next reader to notice something new.`;
+}
+for (let index = 1; index <= 27; index++) {
+  const suffix = index < 10 ? `0${index}` : String(index);
+  const id = `demo-pile-${suffix}`;
+  demoLibrary.push({
+    id, slug: id, title: `An older fictional field letter ${suffix}`,
+    author: 'Wren Ash · fictional', source_type: 'letter',
+    created_at: `2026-04-${suffix}T09:00:00.000Z`,
+    words: index % 3 === 0 ? 460 : 1840, tags: ['Field letters'], images: [],
+  });
+  demoArticles[id] = `## Field letter ${suffix}\n\nAn older fictional letter waits without urgency. The writer describes a shared garden and the questions its visitors leave in a notebook.\n\nKeeping a question is not a promise to answer it today.`;
+}
+for (let index = 1; index <= 2; index++) {
+  const id = `demo-keeper-0${index}`;
+  demoLibrary.push({
+    id, slug: id, title: `A kept question from winter ${index}`,
+    author: 'Tavi Moss · fictional', source_type: 'essay',
+    created_at: `2025-12-0${index}T09:00:00.000Z`, words: 690, read_minutes: 3,
+    tags: ['Memory'], images: [],
+  });
+  demoArticles[id] = '## A kept question\n\nA fictional winter workshop leaves a question on its noticeboard. Returning to it months later offers a different view of the same room.';
+  demoState[id] = { progress: 'new', starred: true, position: 0,
+    triaged_at: '2025-12-03T09:00:00.000Z', progress_changed_at: '2025-12-03T09:00:00.000Z',
+    last_opened_at: index === 1 ? '2026-01-03T09:00:00.000Z' : null };
+}
+export const demoQueue = {
+  queue: ['demo-queued-01', 'demo-queued-02', 'demo-queued-03'],
+  arrivals_since: '2026-06-01T00:00:00.000Z',
+};
 export const demoMeta = { updated_at: '2026-06-24T09:00:00.000Z' };

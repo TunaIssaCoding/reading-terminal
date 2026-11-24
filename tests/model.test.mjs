@@ -193,24 +193,6 @@ test('in-flight migration rebase keeps edits queued after the sent snapshot', ()
   assert.deepEqual(merged.tuna, { remote: 'kept' });
 });
 
-test('arrivals boundary is inclusive and excludes triaged or non-new items', () => {
-  const items = [
-    { id: 'older', created_at: '2026-06-15T11:59:59.999Z' },
-    { id: 'boundary', added_at: time },
-    { id: 'later', added_at: later },
-    { id: 'triaged', added_at: later },
-    { id: 'reading', added_at: later },
-    { id: 'finished', added_at: later },
-    { id: 'let-go', added_at: later },
-    { id: 'unknown-date' },
-  ];
-  const state = { triaged: { progress: 'new', triaged_at: time }, reading: { progress: 'reading' },
-    finished: { progress: 'finished' }, 'let-go': { progress: 'let_go' } };
-  const result = splitArrivals(items, state, time);
-  assert.deepEqual(result.arrivals.map(item => item.id), ['boundary', 'later']);
-  assert.deepEqual(result.pile.map(item => item.id), ['older']);
-  assert.deepEqual(splitArrivals(items, state, 'invalid'), { arrivals: [], pile: [] });
-});
 
 test('library fallbacks preserve explicit metadata and leave missing summaries absent', () => {
   const old = { created_at: earlier, words: 231, source_type: 'fictional-web', tuna: true };

@@ -83,6 +83,8 @@
     </div>
   </section>
   <header class="topbar">
+    <button id="arrivals-mode" class="text-button" data-mode="arrivals">Arrivals (0)</button>
+    <button id="queue-mode" class="text-button" data-mode="queue">Up next (0/10)</button>
     <button id="library-toggle" class="text-button" aria-label="Toggle library" aria-controls="sidebar" aria-expanded="true">Library</button>
     <a class="wordmark" href="#">reading<span>terminal</span><span class="cursor-mark" aria-hidden="true">_</span></a>
     <span id="mode-badge" class="badge">DEMO</span>
@@ -104,8 +106,14 @@
       </div>
     </div>
   </header>
+  <nav id="mobile-modes" aria-label="Reading modes">
+    <button data-mode="arrivals">Arrivals (0)</button>
+    <button data-mode="queue">Up next (0/10)</button>
+    <button data-mode="library">Library</button>
+  </nav>
   <div class="workspace">
     <aside id="sidebar" aria-label="Reading library">
+      <section id="mode-content" tabindex="-1" aria-label="Reading decisions" hidden></section>
       <div class="library-tools">
         <div class="section-eyebrow">YOUR LIBRARY <span id="library-total">0 items</span></div>
         <label class="search-box"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="Search your reading…" aria-label="Search title, tags, author and body"><kbd>/</kbd></label>
@@ -119,7 +127,10 @@
         </div>
         <span id="search-status" role="status"></span>
       </div>
-      <nav id="library" aria-label="Articles" data-density="compact"></nav>
+      <div id="library-scroll">
+        <section id="shelves" aria-label="Library shelves"></section>
+        <nav id="library" aria-label="Articles" data-density="compact"></nav>
+      </div>
       <footer class="sidebar-footer"><span>A little attention, every day.</span><span><kbd>j</kbd> <kbd>k</kbd> navigate · <kbd>↵</kbd> open</span></footer>
     </aside>
     <main id="reader-pane" tabindex="-1" aria-label="Article reader">
@@ -127,11 +138,11 @@
         <span id="reader-position">THE READING ROOM</span>
         <div class="reader-actions">
           <span id="progress-chip" hidden></span>
-          <button id="read-toggle" disabled>Mark finished · r</button>
-          <button id="reader-star" aria-label="Add Keeper — worth coming back to" title="Worth coming back to" aria-pressed="false" disabled>★ Keeper · s</button>
+          <button id="read-toggle" hidden disabled>Mark finished · r</button>
+          <button id="reader-star" aria-label="Add Keeper — worth coming back to" title="Worth coming back to" aria-pressed="false" hidden disabled>★ Keeper · s</button>
           <details id="reader-more" hidden><summary aria-label="Article options">⋯</summary><div class="reader-menu">
             <button id="let-go">Let go</button>
-            <button id="up-next" disabled title="Up next arrives in a later update">Add to Up next</button>
+            <button id="up-next">Add to Up next</button>
             <a id="open-pdf" target="_blank" rel="noopener noreferrer" hidden>Open PDF</a>
             <a id="open-source" target="_blank" rel="noopener noreferrer" hidden>Open source</a>
           </div></details>
@@ -197,6 +208,24 @@
       </form>
     </details>
   </dialog>
-  <dialog id="help-dialog" aria-labelledby="help-title"><header class="dialog-header"><div><span class="section-eyebrow">LESS REACHING, MORE READING</span><h2 id="help-title">Keyboard shortcuts</h2></div><button data-close aria-label="Close shortcuts">×</button></header><dl class="shortcut-list"><dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>Next / previous library item</dd><dt><kbd>Enter</kbd></dt><dd>Open the focused item</dd><dt><kbd>r</kbd></dt><dd>Toggle Finished / Reading</dd><dt><kbd>s</kbd></dt><dd>Toggle Keeper</dd><dt><kbd>h</kbd></dt><dd>Highlight selected source text</dd><dt><kbd>n</kbd></dt><dd>Focus Your notes</dd><dt><kbd>/</kbd></dt><dd>Search the library</dd><dt><kbd>Esc</kbd></dt><dd>Close an overlay, menu or reader</dd><dt><kbd>?</kbd></dt><dd>Open this guide</dd></dl><p>Shortcuts stay quiet while you are typing. Notes and highlights are saved locally first, then synced to your private repository.</p></dialog>
+  <dialog id="help-dialog" aria-labelledby="help-title">
+    <header class="dialog-header"><div><span class="section-eyebrow">LESS REACHING, MORE READING</span><h2 id="help-title">Keyboard shortcuts</h2></div><button data-close aria-label="Close shortcuts">×</button></header>
+    <dl class="shortcut-list">
+      <dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>Next / previous item (K keeps a triage card)</dd>
+      <dt><kbd>Enter</kbd></dt><dd>Read the focused item</dd>
+      <dt><kbd>U</kbd> / <kbd>K</kbd> / <kbd>L</kbd></dt><dd>Triage: Up next / Keep in library / Let go</dd>
+      <dt><kbd>←</kbd> / <kbd>→</kbd></dt><dd>Previous / next triage card</dd>
+      <dt><kbd>x</kbd></dt><dd>Remove selected Up next item; keep it in Library</dd>
+      <dt><kbd>Alt</kbd> + <kbd>↑</kbd> / <kbd>↓</kbd></dt><dd>Reorder selected Up next item</dd>
+      <dt><kbd>r</kbd></dt><dd>Toggle Finished / Reading</dd>
+      <dt><kbd>s</kbd></dt><dd>Toggle Keeper</dd>
+      <dt><kbd>h</kbd></dt><dd>Highlight selected source text</dd>
+      <dt><kbd>n</kbd></dt><dd>Focus Your notes</dd>
+      <dt><kbd>/</kbd></dt><dd>Search the library</dd>
+      <dt><kbd>Esc</kbd></dt><dd>Close an overlay, menu or reader</dd>
+      <dt><kbd>?</kbd></dt><dd>Open this guide</dd>
+    </dl>
+    <p>Shortcuts stay quiet while you are typing. Decisions offer Undo for six seconds. Notes and highlights are saved locally first, then synced to your private repository.</p>
+  </dialog>
 </body>
 </html>
