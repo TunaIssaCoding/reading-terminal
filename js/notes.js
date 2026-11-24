@@ -19,10 +19,11 @@ function highlightStart(highlight) {
 }
 
 export class NotesPane {
-  constructor({ root, onChange, onOpen }) {
+  constructor({ root, onChange, onOpen, notify }) {
     this.root = root;
     this.onChange = onChange;
     this.onOpen = onOpen;
+    this.notify = notify;
     this.articleId = null;
     this.dragDepth = 0;
     const id = `long-notes-${++nextPaneId}`;
@@ -53,16 +54,18 @@ export class NotesPane {
     this.margins = element('div', 'margin-notes-list');
     marginSection.append(this.margins);
     const botSection = element('section', 'bot-summary-section');
-    const botHeading = element('h2', 'notes-section-heading', 'Reading bot summary');
+    const botHeading = element('h2', 'notes-section-heading', 'Summary');
+    this.botHeading = botHeading;
     botHeading.id = `${id}-bot`;
     botSection.setAttribute('aria-labelledby', botHeading.id);
-    this.bot = element('div', 'bot-summary markdown');
+    this.bot = element('div', 'bot-summary bot-content markdown');
     botSection.append(botHeading, this.bot);
     const connectionsSection = element('section', 'connections-section');
     const connectionsHeading = element('h2', 'notes-section-heading', 'Connections');
+    this.connectionsHeading = connectionsHeading;
     connectionsHeading.id = `${id}-connections`;
     connectionsSection.setAttribute('aria-labelledby', connectionsHeading.id);
-    this.connections = element('div', 'bot-connections markdown');
+    this.connections = element('div', 'bot-connections bot-content markdown');
     connectionsSection.append(connectionsHeading, this.connections);
     root.replaceChildren(editorSection, divider, marginSection, botSection, connectionsSection);
 
@@ -108,12 +111,12 @@ export class NotesPane {
       try {
         const highlight = JSON.parse(event.dataTransfer.getData(HIGHLIGHT_TYPE));
         if (!highlight || typeof highlight.id !== 'string' || !highlight.id || typeof highlight.quote !== 'string' || !highlight.quote.trim()) {
-          this.dropStatus.textContent = 'This drop was not a valid highlighted passage.';
+          this.notify?.('This drop was not a valid highlighted passage.');
           return;
         }
         this.appendQuote(highlight.quote);
       } catch {
-        this.dropStatus.textContent = 'This drop was not a valid highlighted passage.';
+        this.notify?.('This drop was not a valid highlighted passage.');
       }
     });
     document.addEventListener('dragend', () => this.clearDrag());
@@ -180,7 +183,18 @@ export class NotesPane {
   }
 
   renderBot(markdown) {
-    const text = String(markdown || '');
+    let text = String(markdown || '');
+    const metadata = {};
+    const header = text.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+    if (header) {
+      for (const line of header[1].split(/\r?\n/)) {
+        const field = line.match(/^(summary_by|connections_by):\s*(.*?)\s*$/);
+        if (field) metadata[field[1]] = field[2].replace(/^(['"])(.*)\1$/, '$2');
+      }
+      text = text.slice(header[0].length);
+    }
+    this.botHeading.textContent = metadata.summary_by ? `Summary · ${metadata.summary_by}` : 'Summary';
+    this.connectionsHeading.textContent = metadata.connections_by ? `Connections · ${metadata.connections_by}` : 'Connections';
     const lines = text.split(/\r?\n/);
     let fence = null;
     let connectionsAt = -1;
@@ -194,8 +208,8 @@ export class NotesPane {
     }
     const summary = connectionsAt < 0 ? text : lines.slice(0, connectionsAt).join('\n');
     const connections = connectionsAt < 0 ? '' : lines.slice(connectionsAt + 1).join('\n');
-    this.bot.innerHTML = summary.trim() ? renderMarkdown(summary) : '<p class="empty-state">No reading bot summary yet.</p>';
-    this.connections.innerHTML = connections.trim() ? renderMarkdown(connections) : '<p class="empty-state">No connections from the reading bot yet.</p>';
+    this.bot.innerHTML = summary.trim() ? renderMarkdown(summary) : '<p class="empty-state">No summary yet.</p>';
+    this.connections.innerHTML = connections.trim() ? renderMarkdown(connections) : '<p class="empty-state">No suggested connections yet.</p>';
   }
 
   focus() {
@@ -214,7 +228,7 @@ export class NotesPane {
     const pane = this.root.closest('aside') || this.root;
     const bottom = this.textarea.getBoundingClientRect().bottom - pane.getBoundingClientRect().bottom;
     if (bottom > 0) pane.scrollTop += bottom + 16;
-    this.dropStatus.textContent = 'Highlighted passage appended to long notes.';
+    this.notify?.('Passage appended to Notes.');
     return true;
   }
 }

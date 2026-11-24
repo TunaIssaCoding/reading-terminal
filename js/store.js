@@ -481,7 +481,7 @@ export class ReadingStore extends EventTarget {
         this._freshOrCached('bot/meta.json', { updated_at: null, notes_summary_len: {} }),
       ]);
       this._assertOpen();
-      if (!this._lastError) this._emit(this._queue.size ? 'queued' : 'local', this.demo ? 'Demo · changes stay on this device.' : this._queue.size ? 'Local edits are waiting to sync.' : 'Private library ready.');
+      if (!this._lastError) this._emit(this._queue.size ? 'queued' : this.demo ? 'local' : 'synced', this.demo ? 'Demo · changes stay on this device.' : this._queue.size ? 'Local edits are waiting to sync.' : 'Private library ready.');
       return { library: clone(library), state: clone(state), meta: clone(meta) };
     })();
     try { return await this._initPromise; } catch (error) { this._initPromise = null; throw error; }
@@ -798,7 +798,7 @@ export class ReadingStore extends EventTarget {
           } else await this._push(snapshot);
         }
         this._lastError = null;
-        this._emit('local', this.demo ? 'Saved on this device · demo.' : 'All changes synced to your private repository.');
+        this._emit(this.demo ? 'local' : 'synced', this.demo ? 'Saved on this device · demo.' : 'All changes synced to your private repository.');
       } catch (error) { this._error(error); }
       return { pending: this._queue.size };
     })();

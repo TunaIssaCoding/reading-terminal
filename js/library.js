@@ -72,6 +72,7 @@ export class Library {
     if (this.densityToggle) {
       this.densityToggle.setAttribute('aria-pressed', String(compact));
       this.densityToggle.textContent = compact ? 'Compact' : 'Comfortable';
+      this.densityToggle.setAttribute('aria-label', `${compact ? 'Compact' : 'Comfortable'} library density`);
       this.densityToggle.title = `Switch to ${compact ? 'comfortable' : 'compact'} library spacing`;
     }
   }

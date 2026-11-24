@@ -18,25 +18,30 @@
       <p class="section-eyebrow">YOUR PRIVATE READING ROOM</p>
       <h1 id="lock-title">Reading terminal</h1>
       <p>Locked. Unlock to open your library.</p>
-      <button id="unlock-passkey" class="primary" hidden>Unlock with passkey</button>
       <form id="unlock-form">
         <label for="unlock-password">Password</label>
         <input id="unlock-password" type="password" autocomplete="current-password" required>
+        <button id="unlock-submit" type="submit" class="primary" disabled>Unlock</button>
+        <button id="unlock-passkey" type="button" hidden>Unlock with passkey</button>
         <label class="check-label"><input id="unlock-remember" type="checkbox" checked>Remember this device</label>
         <p class="field-help">Only on a trusted device. Anyone using this browser profile can open your remembered library.</p>
-        <button id="unlock-submit" type="submit" class="primary" disabled>Unlock</button>
       </form>
       <p id="unlock-error" role="alert"></p>
       <button id="unlock-retry" hidden>Retry loading vault</button>
-      <p><a href="#demo" data-demo>Explore the demo library</a></p>
-      <a href="#setup" class="field-help">Set up or replace a vault</a>
+      <p><a href="#demo" data-demo>Explore the demo</a></p>
+      <details id="lock-other-options"><summary>Other options</summary>
+        <p><a href="#setup">Set up a vault</a></p>
+        <p><a href="#replace">Replace vault</a></p>
+      </details>
     </div>
   </section>
   <section id="setup-screen" class="auth-screen" aria-labelledby="setup-title" hidden>
     <div class="auth-card">
       <p class="section-eyebrow">A KEY TO YOUR LIBRARY</p>
-      <h1 id="setup-title">Reading terminal</h1>
+      <h1 id="setup-title">Set up a vault</h1>
       <p>Set a password backup, then add a passkey in Settings for everyday unlocking.</p>
+      <p id="setup-existing" hidden>A vault already exists. Setup will not overwrite it. <a href="#replace">Replace vault</a> if you need a new password and keys.</p>
+      <div id="setup-form-host"><div id="vault-form-content">
       <form id="setup-form">
         <label for="setup-token">GitHub access token</label>
         <input id="setup-token" type="password" autocomplete="off" spellcheck="false" required>
@@ -54,33 +59,57 @@
           <label for="setup-site-branch">Site branch</label><input id="setup-site-branch" value="main" required autocomplete="off">
         </details>
         <label class="check-label"><input id="setup-remember" type="checkbox" checked>Remember this device</label>
-        <label class="check-label"><input id="setup-replace" type="checkbox">Replace the existing vault</label>
-        <p class="field-help">Replacement is irreversible: existing passkeys will stop working. Other remembered devices will lock when they see the new vault. You do not need the old password to replace it.</p>
+        <div id="replace-fields" hidden>
+          <label for="replace-confirm">Type REPLACE to confirm</label>
+          <input id="replace-confirm" autocomplete="off" spellcheck="false" required disabled aria-describedby="replace-warning">
+        </div>
         <button id="setup-submit" class="primary" type="submit">Create vault and unlock</button>
       </form>
       <p id="setup-status" role="status"></p>
       <p id="setup-error" role="alert"></p>
-      <p><a href="#demo" data-demo>Explore the demo library</a> · <a href="#" id="setup-back">Back to unlock</a></p>
+      </div></div>
+      <p><a href="#demo" data-demo>Explore the demo</a> · <a href="#" id="setup-back" data-auth-back>Back to unlock</a></p>
+    </div>
+  </section>
+  <section id="replace-screen" class="auth-screen" aria-labelledby="replace-title" hidden>
+    <div class="auth-card">
+      <p class="section-eyebrow">A NEW KEY TO YOUR LIBRARY</p>
+      <h1 id="replace-title">Replace vault</h1>
+      <p id="replace-warning">Replacement is irreversible: existing passkeys will stop working. Other remembered devices will lock when they see the new vault. You do not need the old password to replace it.</p>
+      <p>Set a new password backup and enter REPLACE exactly before publishing a replacement.</p>
+      <div id="replace-form-host"></div>
+      <p><a href="#setup">Set up a vault instead</a> · <a href="#" id="replace-back" data-auth-back>Back to unlock</a></p>
+      <p><a href="#demo" data-demo>Explore the demo</a></p>
     </div>
   </section>
   <header class="topbar">
-    <button id="library-toggle" class="icon-button" aria-label="Toggle library" aria-controls="sidebar" aria-expanded="true">☰</button>
+    <button id="library-toggle" class="text-button" aria-label="Toggle library" aria-controls="sidebar" aria-expanded="true">Library</button>
     <a class="wordmark" href="#">reading<span>terminal</span><span class="cursor-mark" aria-hidden="true">_</span></a>
     <span id="mode-badge" class="badge">DEMO</span>
     <div class="topbar-spacer"></div>
     <span id="sync-status" role="status" aria-live="polite">Opening local library…</span>
-    <button id="theme-toggle" class="icon-button" aria-label="Switch to light theme" title="Toggle theme">◐</button>
-    <button id="help-open" class="icon-button" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">?</button>
     <button id="lock-button" class="text-button" hidden>Lock</button>
-    <button id="settings-open" class="text-button">Settings</button>
     <button id="notes-toggle" class="text-button" aria-controls="notes-pane" aria-expanded="false">Notes</button>
+    <div class="topbar-more">
+      <button id="more-toggle" class="icon-button" aria-label="More options" aria-controls="more-menu" aria-expanded="false">⋯</button>
+      <div id="more-menu" class="topbar-menu" aria-label="More options" hidden>
+        <button id="view-toggle" aria-controls="view-menu" aria-expanded="false">View</button>
+        <div id="view-menu" aria-label="View" hidden>
+          <button id="library-density" aria-label="Library density" aria-controls="library" aria-pressed="true" title="Switch to comfortable library spacing">Compact</button>
+          <button id="theme-toggle" aria-label="Switch to light theme">Dark theme</button>
+        </div>
+        <button id="settings-open">Settings</button>
+        <button id="help-open">Help <kbd>?</kbd></button>
+        <div id="mobile-extras"></div>
+      </div>
+    </div>
   </header>
   <div class="workspace">
     <aside id="sidebar" aria-label="Reading library">
       <div class="library-tools">
         <div class="section-eyebrow">YOUR LIBRARY <span id="library-total">0 items</span></div>
         <label class="search-box"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="Search your reading…" aria-label="Search title, tags, author and body"><kbd>/</kbd></label>
-        <div class="filter-row"><button id="star-filter" aria-pressed="false">☆ Starred only</button><button id="tag-filter" hidden></button><button id="library-density" aria-label="Compact library density" aria-controls="library" aria-pressed="true" title="Switch to comfortable library spacing">Compact</button></div>
+        <div class="filter-row"><button id="star-filter" aria-pressed="false">☆ Starred only</button><button id="tag-filter" hidden></button></div>
         <span id="search-status" role="status"></span>
       </div>
       <nav id="library" aria-label="Articles" data-density="compact"></nav>
@@ -94,16 +123,20 @@
       <footer class="reader-footer"><span>SELECT A PASSAGE, THEN <kbd>h</kbd> TO THINK IN THE MARGINS</span><span id="reading-progress">0%</span></footer>
     </main>
     <div id="notes-resizer" role="separator" aria-label="Resize notes pane" aria-orientation="vertical" tabindex="0" aria-valuemin="22" aria-valuemax="50" aria-valuenow="30"></div>
-    <aside id="notes-pane" aria-label="Article notes"><div class="notes-topline"><span>THE OTHER PAGE</span><span>PRIVATE NOTES <button id="notes-close" aria-label="Close notes drawer">×</button></span></div><div id="notes-content"></div></aside>
+    <aside id="notes-pane" aria-label="Article notes"><div class="notes-topline"><span>Notes</span><span>PRIVATE NOTES <button id="notes-close" aria-label="Close notes drawer">×</button></span></div><div id="notes-content"></div></aside>
   </div>
   <button id="drawer-backdrop" aria-label="Close drawer" hidden></button>
-  <div id="selection-actions" class="selection-actions" hidden><button id="highlight-selection">Highlight <kbd>h</kbd></button></div>
-  <div id="selection-menu" class="context-menu" role="menu" aria-label="Selection actions" hidden><button role="menuitem" data-action="highlight">Highlight <kbd>h</kbd></button><button role="menuitem" data-action="copy">Copy</button><button role="menuitem" data-action="search">Search web ↗</button></div>
+  <div id="selection-actions" class="selection-actions" role="toolbar" aria-label="Selection actions" hidden><button id="highlight-selection">Highlight <kbd>h</kbd></button><button id="send-selection">Send to notes</button><button id="copy-selection">Copy</button></div>
   <div id="toast" role="status" aria-live="polite" hidden></div>
   <dialog id="settings-dialog" aria-labelledby="settings-title">
-    <header class="dialog-header"><div><span class="section-eyebrow">YOUR DATA, YOUR REPOSITORY</span><h2 id="settings-title">Connection & settings</h2></div><button type="button" data-close aria-label="Close settings">×</button></header>
-    <section id="security-section" hidden>
+    <header class="dialog-header"><div><span class="section-eyebrow">YOUR DATA, YOUR REPOSITORY</span><h2 id="settings-title">Settings</h2></div><button type="button" data-close aria-label="Close settings">×</button></header>
+    <section id="security-section">
       <h3>Security</h3>
+      <div id="security-unavailable">
+        <p id="security-unavailable-message">Set up a vault to protect your connection with a password and passkeys.</p>
+        <p><a href="#setup" id="settings-setup">Set up a vault</a></p>
+      </div>
+      <div id="security-controls" hidden>
       <p>Use a passkey as your primary key; keep your password as backup.</p>
       <label for="passkey-label">Passkey label (optional)</label><input id="passkey-label" maxlength="120">
       <button id="add-passkey" type="button">Add passkey on this device</button>
@@ -119,6 +152,18 @@
         </form>
       </details>
       <p id="security-status" role="status"></p>
+      </div>
+    </section>
+    <section id="backup-section">
+      <h3>Backup</h3>
+      <p>Export all user state and notes as JSON. Import merges with this library's existing notes; it never deletes them. Backups contain private text—store them securely.</p>
+      <div class="dialog-actions"><button id="export-data" type="button">Export backup</button><label class="button-label">Import backup<input id="import-data" type="file" accept="application/json,.json" hidden></label></div>
+    </section>
+    <section id="connection-section">
+      <h3>Connection</h3>
+      <p id="connection-summary">Vault connections keep your GitHub token encrypted. Use the advanced options below only for a manual connection.</p>
+      <p id="connection-result" role="status"></p>
+      <p class="field-help">See <a href="README.md" target="_blank" rel="noopener">setup instructions</a> for the private repository layout.</p>
     </section>
     <details id="advanced-connection"><summary>Advanced: connect with a token</summary>
       <form id="settings-form">
@@ -130,12 +175,7 @@
         <div class="dialog-actions"><button id="test-connection" type="button">Test connection</button><button type="submit" class="primary">Save & connect</button></div>
       </form>
     </details>
-      <p id="connection-result" role="status"></p>
-      <hr><h3>Portable by design</h3><p>Export all user state and notes as JSON. Import merges with this library's existing notes; it never deletes them. Backups contain private text—store them securely.</p>
-      <div class="dialog-actions"><button id="export-data" type="button">Export backup</button><label class="button-label">Import backup<input id="import-data" type="file" accept="application/json,.json" hidden></label></div>
-      <p class="field-help">See <a href="README.md" target="_blank" rel="noopener">setup instructions</a> for the private repository layout.</p>
-    <p><a href="#setup" id="settings-setup">Set up or replace a vault</a></p>
   </dialog>
-  <dialog id="help-dialog" aria-labelledby="help-title"><header class="dialog-header"><div><span class="section-eyebrow">LESS REACHING, MORE READING</span><h2 id="help-title">Keyboard shortcuts</h2></div><button data-close aria-label="Close shortcuts">×</button></header><dl class="shortcut-list"><dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>Next / previous library item</dd><dt><kbd>Enter</kbd></dt><dd>Open the focused item</dd><dt><kbd>r</kbd></dt><dd>Toggle read</dd><dt><kbd>s</kbd></dt><dd>Toggle star</dd><dt><kbd>h</kbd></dt><dd>Highlight selected source text</dd><dt><kbd>n</kbd></dt><dd>Focus long notes</dd><dt><kbd>/</kbd></dt><dd>Search the library</dd><dt><kbd>Esc</kbd></dt><dd>Close an editor, drawer or popover</dd><dt><kbd>?</kbd></dt><dd>Open this guide</dd></dl><p>Shortcuts stay out of your way while typing. Select text to write between its lines. Drag a highlighted passage onto the other page, or use its “↗” action. Shift + right-click keeps the browser menu.</p></dialog>
+  <dialog id="help-dialog" aria-labelledby="help-title"><header class="dialog-header"><div><span class="section-eyebrow">LESS REACHING, MORE READING</span><h2 id="help-title">Keyboard shortcuts</h2></div><button data-close aria-label="Close shortcuts">×</button></header><dl class="shortcut-list"><dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>Next / previous library item</dd><dt><kbd>Enter</kbd></dt><dd>Open the focused item</dd><dt><kbd>r</kbd></dt><dd>Toggle read</dd><dt><kbd>s</kbd></dt><dd>Toggle star</dd><dt><kbd>h</kbd></dt><dd>Highlight selected source text</dd><dt><kbd>n</kbd></dt><dd>Focus Notes</dd><dt><kbd>/</kbd></dt><dd>Search the library</dd><dt><kbd>Esc</kbd></dt><dd>Close an overlay, menu or reader</dd><dt><kbd>?</kbd></dt><dd>Open this guide</dd></dl><p>Reading shortcuts stay out of your way in inputs, editors and the lock screen. The interlinear editor keeps its own Esc to finish editing. Select text for Highlight, Send to notes and Copy, or drag a highlighted passage to Notes. Right-click always uses the browser menu.</p></dialog>
 </body>
 </html>

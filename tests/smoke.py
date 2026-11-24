@@ -59,6 +59,7 @@ class Repository:
     def __init__(self, index="full", private=True):
         self.private = private
         self.requests = []
+        self.public_vault_requests = []
         self.puts = []
         self.violations = []
         self.conflicts = {}
@@ -203,10 +204,10 @@ class Repository:
 
 
 @contextmanager
-def session(browser, base, repo=None, mobile=False, store_only=False, demo=False, vault=False):
+def session(browser, base, repo=None, mobile=False, store_only=False, demo=False, vault=False, clock=False):
     repo = repo or Repository()
     context = browser.new_context(viewport={"width": 390 if mobile else 1440, "height": 844 if mobile else 900},
-                                  service_workers="block", reduced_motion="reduce")
+                                  service_workers="block", reduced_motion="reduce", has_touch=mobile)
     errors, unexpected = [], []
     origin = urlparse(base)
 
@@ -218,6 +219,7 @@ def session(browser, base, repo=None, mobile=False, store_only=False, demo=False
             return route.fulfill(content_type="text/html", body="<title>Fictional external PDF destination</title>")
         if (url.scheme, url.netloc) == (origin.scheme, origin.netloc):
             if url.path.endswith("/vault.json"):
+                repo.public_vault_requests.append(request.url)
                 if repo.public_vault_error:
                     return route.abort("internetdisconnected")
                 if repo.vault is None:
@@ -239,12 +241,12 @@ def session(browser, base, repo=None, mobile=False, store_only=False, demo=False
             "localStorage.setItem('reading-terminal.settings', " + json.dumps(json.dumps(SETTINGS)) + ")")
     context.on("page", lambda page: page.on("pageerror", lambda error: errors.append(str(error))))
     page = context.new_page()
+    if clock:
+        page.clock.install()
     page.route("https://api.github.com/**", repo.route)
     page.set_default_timeout(12000)
-    page.goto(base + ("/__smoke_store__.html" if store_only else "/#article=essay-01" if not demo and not vault else "/"))
-    if demo:
-        expect(page.locator("#setup-screen")).to_be_visible()
-        page.locator("#setup-screen").get_by_role("link", name="Explore the demo library").click()
+    page.goto(base + ("/__smoke_store__.html" if store_only else "/#demo" if demo else
+                      "/#article=essay-01" if not vault else "/"))
     if not store_only and not vault:
         page.wait_for_selector(".source-line")
         expect(page.locator(NOTES)).to_be_enabled()
@@ -281,8 +283,30 @@ def set_status(page, slug, value):
     status(page, slug, value)
 
 
+def menu_action(page, selector, view=False):
+    page.locator("#more-toggle").click()
+    expect(page.locator("#more-menu")).to_be_visible()
+    if view:
+        page.locator("#view-toggle").click()
+        expect(page.locator("#view-menu")).to_be_visible()
+    page.locator(selector).click()
+    if page.locator("#more-menu").is_visible():
+        page.keyboard.press("Escape")
+    if page.locator("#more-menu").is_visible():
+        page.keyboard.press("Escape")
+
+
+def lock_library(page):
+    if page.locator("#lock-button").is_visible():
+        page.locator("#lock-button").click()
+    else:
+        menu_action(page, "#lock-button")
+    expect(page.locator("#lock-screen")).to_be_visible()
+
+
 def synced(page):
-    expect(page.locator("#sync-status")).to_have_text("All changes synced to your private repository.", timeout=15000)
+    expect(page.locator("#sync-status")).to_have_text(re.compile(r"^Synced\b", re.I), timeout=15000)
+    expect(page.locator("#sync-status")).to_have_attribute("title", re.compile(r".+"))
 
 
 def navigation_media_layout(browser, base):
@@ -304,13 +328,13 @@ def navigation_media_layout(browser, base):
               visible: rows.filter(r => {const b=r.getBoundingClientRect();return b.top>=box.top && b.bottom<=box.bottom}).length};
         }""")
         assert 9 <= metrics["visible"] <= 13, metrics
-        page.locator("#library-density").click()
+        menu_action(page, "#library-density", view=True)
         comfortable = page.locator(".library-item").first.bounding_box()["height"]
         assert comfortable > metrics["height"] + 10, (metrics, comfortable)
         page.reload()
         opened(page, "essay-01")
         assert page.locator(".library-item").first.bounding_box()["height"] > metrics["height"] + 10
-        page.locator("#library-density").click()
+        menu_action(page, "#library-density", view=True)
         icons = page.locator('link[rel~="icon"]')
         assert icons.count(), "Missing favicon link"
         icon_url = icons.first.evaluate("el => el.href")
@@ -445,7 +469,7 @@ def debounce_status_and_growth(browser, base):
         synced(page)
 
 
-def make_highlight(page, paragraph=0, note="A fictional margin thought"):
+def select_passage(page, paragraph=0):
     line = page.locator(".source-paragraph").nth(paragraph).locator(".line-text").first
     line.scroll_into_view_if_needed()
     box = line.bounding_box()
@@ -455,6 +479,11 @@ def make_highlight(page, paragraph=0, note="A fictional margin thought"):
     page.mouse.up()
     page.wait_for_function("() => getSelection().toString().trim().length > 10")
     expect(page.locator("#selection-actions")).to_be_visible()
+    return page.evaluate("getSelection().toString().trim()")
+
+
+def make_highlight(page, paragraph=0, note="A fictional margin thought"):
+    select_passage(page, paragraph)
     page.keyboard.press("h")
     page.wait_for_function("() => document.activeElement.matches('.interlinear-editor')")
     page.keyboard.insert_text(note)
@@ -614,6 +643,12 @@ def keyboard_stars_and_read(browser, base):
             status(page, "essay-01", expected_status)
         synced(page)
         assert all(path.startswith("user/") for path, _, _ in repo.puts)
+        page.locator("#reader-pane").focus()
+        page.keyboard.press("Escape")
+        expect(page.locator(".source-line")).to_have_count(0)
+        expect(page.locator(NOTES)).to_be_disabled()
+        page.keyboard.press("Enter")
+        opened(page, "essay-01")
 
 
 def mobile_and_demo(browser, base):
@@ -640,6 +675,8 @@ def mobile_and_demo(browser, base):
         page.wait_for_timeout(2500)
         assert "Saving" not in page.locator("#sync-status").inner_text()
         assert not repo.requests, "Demo mode contacted GitHub"
+        assert not repo.public_vault_requests, "Direct demo fetched vault.json"
+        assert TOKEN not in page.evaluate("JSON.stringify({...localStorage})")
         page.goto(base + "/#demo")
         page.reload()
         expect(page.locator(".library-item")).to_have_count(3)
@@ -648,6 +685,231 @@ def mobile_and_demo(browser, base):
         expect(page.locator("#lock-button")).not_to_be_visible()
         expect(page.locator(NOTES)).to_be_enabled()
         assert not repo.requests, "Direct demo link contacted GitHub"
+        assert not repo.public_vault_requests, "Reloading demo fetched vault.json"
+    with session(browser, base, vault=True) as (page, repo, _):
+        expect(page.locator("#setup-screen")).to_be_visible()
+        page.locator("#setup-screen [data-demo]").click()
+        expect(page.locator(".library-item")).to_have_count(3)
+        expect(page.locator(NOTES)).to_be_enabled()
+        assert not repo.requests, "Setup demo link contacted GitHub"
+
+
+def phase_one_surface(browser, base):
+    for mobile in (False, True):
+        repo = Repository()
+        repo.items[1]["summary_by"] = "Fictional intake agent"
+        repo.set("library.json", repo.items)
+        with session(browser, base, repo, mobile=mobile) as (page, repo, _):
+            for selector in ("#settings-open", "#help-open", "#view-toggle", "#theme-toggle", "#library-density"):
+                expect(page.locator(selector)).not_to_be_visible()
+            if mobile:
+                controls = page.locator(".topbar button:visible").evaluate_all("els => els.map(el => el.id).sort()")
+                assert controls == sorted(["library-toggle", "notes-toggle", "more-toggle"]), controls
+                expect(page.locator(".wordmark")).to_be_visible()
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+            page.locator("#more-toggle").click()
+            for selector in ("#view-toggle", "#settings-open", "#help-open"):
+                expect(page.locator(selector)).to_be_visible()
+            page.locator("#view-toggle").click()
+            expect(page.locator("#theme-toggle")).to_be_visible()
+            expect(page.locator("#library-density")).to_be_visible()
+            page.keyboard.press("Escape")
+            expect(page.locator("#view-menu")).not_to_be_visible()
+            if page.locator("#more-menu").is_visible():
+                page.keyboard.press("Escape")
+            expect(page.locator("#more-menu")).not_to_be_visible()
+            initial_theme = page.locator("html").get_attribute("data-theme")
+            menu_action(page, "#theme-toggle", view=True)
+            assert page.locator("html").get_attribute("data-theme") != initial_theme
+            page.reload()
+            opened(page, "essay-01")
+            assert page.locator("html").get_attribute("data-theme") != initial_theme
+            page.locator("#more-toggle").click()
+            page.locator("#article-header h1").click(position={"x": 5, "y": 5})
+            expect(page.locator("#more-menu")).not_to_be_visible()
+            menu_action(page, "#help-open")
+            expect(page.locator("#help-dialog")).to_be_visible()
+            page.keyboard.press("Escape")
+            expect(page.locator("#help-dialog")).not_to_be_visible()
+            menu_action(page, "#settings-open")
+            expect(page.locator("#settings-dialog")).to_be_visible()
+            sections = page.locator("#settings-dialog > section, #settings-dialog > details").evaluate_all(
+                "els => els.map(el => el.id)")
+            assert sections == ["security-section", "backup-section", "connection-section", "advanced-connection"], sections
+            assert not page.locator("#advanced-connection").evaluate("el => el.open")
+            expect(page.locator("#export-data")).to_be_visible()
+            expect(page.locator("#security-unavailable")).to_be_visible()
+            page.keyboard.press("Escape")
+            expect(page.locator("#settings-dialog")).not_to_be_visible()
+            expect(page.locator(".article-summary .bot-label")).to_contain_text("from intake")
+            expect(page.locator(".article-summary .bot-label")).not_to_contain_text("Fictional intake agent")
+            if mobile:
+                page.locator("#library-toggle").click()
+            open_item(page, "essay-02")
+            expect(page.locator(".article-summary .bot-label")).to_contain_text("Fictional intake agent")
+            if mobile:
+                page.locator("#notes-toggle").click()
+            expect(page.locator(".notes-topline")).to_contain_text("Notes")
+            assert not re.search(r"the other page", page.locator("body").text_content(), re.I)
+            assert not re.search(r"the other page", page.locator(NOTES).get_attribute("aria-label"), re.I)
+
+
+def selection_toolbar_and_undo(browser, base):
+    with session(browser, base) as (page, repo, _):
+        page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+        open_item(page, "essay-05")
+        quote = select_passage(page)
+        for selector in ("#highlight-selection", "#send-selection", "#copy-selection"):
+            expect(page.locator(selector)).to_be_visible()
+        page.evaluate("""() => {
+          window.contextPrevented = null;
+          document.addEventListener('contextmenu', event => {
+            queueMicrotask(() => { window.contextPrevented = event.defaultPrevented; });
+          }, {once:true});
+        }""")
+        page.locator(".line-text").first.click(button="right")
+        page.wait_for_function("() => window.contextPrevented !== null")
+        assert page.evaluate("window.contextPrevented") is False, "Reader suppressed the native context menu"
+        quote = select_passage(page)
+        page.locator("#copy-selection").click()
+        assert page.evaluate("navigator.clipboard.readText()") == quote
+        expect(page.locator(NOTES)).to_have_value("")
+        quote = select_passage(page)
+        page.locator("#send-selection").click()
+        expect(page.locator(NOTES)).to_have_value("> " + quote)
+        quote = select_passage(page, 1)
+        page.locator("#highlight-selection").click()
+        expect(page.locator(".interlinear-editor")).to_be_focused()
+        page.keyboard.insert_text("A toolbar-created fictional margin")
+        page.keyboard.press("Escape")
+        highlight_id = page.locator("mark[data-highlight]").first.get_attribute("data-highlight")
+        synced(page)
+        # Let promotion notices expire so each Undo below addresses only deletion.
+        page.wait_for_timeout(6100)
+        page.locator("mark[data-highlight]").first.click()
+        page.locator('button[data-note-action="delete"]').first.click()
+        expect(page.locator("mark[data-highlight]")).to_have_count(0)
+        open_item(page, "essay-06")
+        page.wait_for_timeout(4400)
+        undo = page.locator("#toast .toast-message").filter(
+            has=page.get_by_role("button", name="Undo", exact=True))
+        expect(undo).to_have_count(1)
+        undo.get_by_role("button", name="Undo", exact=True).click()
+        open_item(page, "essay-05")
+        expect(page.locator(f'mark[data-highlight="{highlight_id}"]').first).to_be_visible()
+        expect(page.locator(".margin-note-text")).to_contain_text("A toolbar-created fictional margin")
+        synced(page)
+        page.reload()
+        opened(page, "essay-05")
+        assert any(h["id"] == highlight_id and not h.get("deleted")
+                   for h in repo.document("user/notes/essay-05.json")["highlights"])
+        page.locator("mark[data-highlight]").first.click()
+        page.locator('button[data-note-action="delete"]').first.click()
+        page.wait_for_timeout(6200)
+        expect(page.locator("#toast .toast-message button")).to_have_count(0)
+        synced(page)
+        page.reload()
+        opened(page, "essay-05")
+        expect(page.locator("mark[data-highlight]")).to_have_count(0)
+        assert highlight_id in repo.document("user/notes/essay-05.json")["deleted_highlights"]
+    with session(browser, base, mobile=True) as (page, repo, _):
+        source = page.locator(".source-run").first
+        source.scroll_into_view_if_needed()
+        quote = source.evaluate("""el => {
+          document.activeElement.blur();
+          const range=document.createRange(); range.selectNodeContents(el);
+          const selection=getSelection(); selection.removeAllRanges(); selection.addRange(range);
+          return selection.toString();
+        }""")
+        toolbar = page.locator("#selection-actions")
+        expect(toolbar).to_be_visible()
+        bounds = toolbar.bounding_box()
+        assert 0 <= bounds["x"] and bounds["x"] + bounds["width"] <= 390, bounds
+        assert 0 <= bounds["y"] and bounds["y"] + bounds["height"] <= 844, bounds
+        assert bounds["y"] + bounds["height"] <= source.bounding_box()["y"] + 1, bounds
+        page.locator("#highlight-selection").tap()
+        expect(page.locator(".interlinear-editor")).to_be_focused()
+        synced(page)
+        assert repo.document("user/notes/essay-01.json")["highlights"][0]["quote"] == quote
+
+
+def automatic_status_undo_and_typing(browser, base):
+    with session(browser, base) as (page, repo, _):
+        for slug, previous in (("essay-01", "unread"), ("essay-17", "read")):
+            open_item(page, slug)
+            page.locator(NOTES).fill("Keep this fictional thought after status Undo.")
+            status(page, slug, "commented")
+            page.locator("#toast .toast-message").get_by_role("button", name="Undo", exact=True).last.click()
+            status(page, slug, previous)
+            expect(page.locator(NOTES)).to_have_value("Keep this fictional thought after status Undo.")
+            synced(page)
+            status(page, slug, previous)
+            assert repo.document(f"user/notes/{slug}.json")["long_notes"] == "Keep this fictional thought after status Undo."
+        open_item(page, "essay-02")
+        for editor in (page.locator(NOTES),):
+            editor.fill("")
+            editor.press_sequentially("rjkns/?")
+            editor.press("Enter")
+            editor.press("Escape")
+            expect(editor).to_be_focused()
+            expect(editor).to_have_value("rjkns/?\n")
+            expect(page.locator("#help-dialog")).not_to_be_visible()
+            opened(page, "essay-02")
+            expect(page.locator("#reader-star")).to_have_attribute("aria-pressed", "false")
+        make_highlight(page, note="Editable shortcut guard ")
+        page.locator("mark[data-highlight]").first.click()
+        editor = page.locator(".interlinear-editor")
+        editor.press("End")
+        editor.press_sequentially("rjkns/?")
+        expect(editor).to_have_value(re.compile(r"rjkns/\?"))
+        expect(page.locator("#help-dialog")).not_to_be_visible()
+        opened(page, "essay-02")
+        expect(page.locator("#reader-star")).to_have_attribute("aria-pressed", "false")
+        editor.press("Escape")
+        for editable in ("", "true", "plaintext-only"):
+            page.evaluate("""value => {
+              const editor=document.createElement('div'); editor.id='smoke-editor';
+              editor.setAttribute('contenteditable',value);
+              document.querySelector('#article-header').append(editor); editor.focus();
+            }""", editable)
+            page.keyboard.type("rjkns/?")
+            page.keyboard.press("Enter")
+            page.keyboard.press("Escape")
+            expect(page.locator("#smoke-editor")).to_be_focused()
+            expect(page.locator("#help-dialog")).not_to_be_visible()
+            expect(page.locator("#reader-star")).to_have_attribute("aria-pressed", "false")
+            opened(page, "essay-02")
+            page.locator("#smoke-editor").evaluate("el => el.remove()")
+        # A fresh article demonstrates the automatic read threshold and its Undo.
+        open_item(page, "essay-03")
+        page.evaluate("""() => {
+          const pane=document.querySelector('#reader-pane'), body=document.querySelector('#article-body');
+          const start=body.getBoundingClientRect().top-pane.getBoundingClientRect().top+pane.scrollTop;
+          pane.scrollTop=start+body.offsetHeight*.94-pane.clientHeight;
+          pane.dispatchEvent(new Event('scroll'));
+        }""")
+        status(page, "essay-03", "read")
+        page.locator("#toast .toast-message").get_by_role("button", name="Undo", exact=True).last.click()
+        status(page, "essay-03", "unread")
+        page.locator("#reader-pane").dispatch_event("scroll")
+        status(page, "essay-03", "unread")
+        synced(page)
+        assert repo.document("user/state.json")["essay-03"]["status"] == "unread"
+
+
+def relative_sync_timer(browser, base):
+    with session(browser, base, clock=True) as (page, repo, _):
+        page.locator(NOTES).fill("Fictional sync timestamp observation.")
+        synced(page)
+        sync = page.locator("#sync-status")
+        initial, absolute = sync.inner_text(), sync.get_attribute("title")
+        assert page.evaluate("value => Number.isFinite(Date.parse(value))", absolute), absolute
+        writes = len(repo.puts)
+        page.clock.run_for(65000)
+        expect(sync).not_to_have_text(initial)
+        expect(sync).to_have_text(re.compile(r"^Synced\b", re.I))
+        expect(sync).to_have_attribute("title", absolute)
+        assert len(repo.puts) == writes, "Relative-time refresh wrote repository data"
 
 
 def store_conflict_export_import(browser, base):
@@ -720,7 +982,7 @@ def fill_setup(page, password=PASSWORD):
     page.locator("#setup-token").fill(TOKEN)
     page.locator("#setup-password").fill(password)
     page.locator("#setup-confirm").fill(password)
-    details = page.locator("#setup-screen details")
+    details = page.locator("#setup-form details")
     if not details.evaluate("el => el.open"):
         details.locator("summary").click()
     for field, value in {"owner": "fictional-reader", "repo": "fictional-library", "branch": "main",
@@ -731,7 +993,7 @@ def fill_setup(page, password=PASSWORD):
 def vault_library(page):
     expect(page.locator("#lock-screen")).not_to_be_visible()
     expect(page.locator("#setup-screen")).not_to_be_visible()
-    expect(page.locator("#lock-button")).to_be_visible()
+    expect(page.locator("#lock-button")).to_have_count(1)
     expect(page.locator("#lock-button")).to_be_enabled()
     expect(page.locator('[data-library-id="essay-01"]')).to_have_count(1)
     expect(page.locator(NOTES)).to_be_enabled()
@@ -820,17 +1082,30 @@ def setup_unlock_remember_lock(browser, base):
         page.reload()
         vault_library(page)
         no_browser_secrets(page)
-        page.locator("#lock-button").click()
+        lock_library(page)
         expect(page.locator("#lock-screen")).to_be_visible()
         auth_mobile_layout(page, "#lock-screen", ["#unlock-password", "#unlock-submit"])
         expect(page.locator("#unlock-passkey")).not_to_be_visible()
         expect(page.locator("#unlock-password")).to_have_attribute("autocomplete", "current-password")
         expect(page.locator("#unlock-error")).to_have_attribute("role", "alert")
+        page.locator("#unlock-password").press_sequentially("rjkns/?")
+        expect(page.locator("#unlock-password")).to_have_value("rjkns/?")
+        expect(page.locator("#help-dialog")).not_to_be_visible()
+        expect(page.locator("#more-menu")).not_to_be_visible()
+        expect(page.locator("#lock-screen")).to_be_visible()
+        page.locator("#unlock-submit").focus()
+        for key in ("r", "j", "k", "n", "s", "/", "?", "Escape"):
+            page.keyboard.press(key)
+        expect(page.locator("#unlock-submit")).to_be_focused()
+        expect(page.locator("#help-dialog")).not_to_be_visible()
+        expect(page.locator("#article-body")).to_be_empty()
+        expect(page.locator("#lock-screen")).to_be_visible()
+        page.locator("#unlock-password").fill("")
         page.reload()
         expect(page.locator("#lock-screen")).to_be_visible()
         page.locator("#unlock-password").fill("Wrong fictional password 123!")
         page.locator("#unlock-submit").click()
-        expect(page.locator("#unlock-error")).to_have_text("That password did not unlock the library.")
+        expect(page.locator("#unlock-error")).not_to_be_empty()
         expect(page.locator("#unlock-password")).to_have_value("")
         expect(page.locator("#lock-screen")).to_be_visible()
         unlock_password(page, remember=False)
@@ -843,7 +1118,7 @@ def setup_unlock_remember_lock(browser, base):
         page.wait_for_function("() => !document.querySelector('#notes-pane').inert")
         page.locator(NOTES).fill("Fictional edit queued before Lock while GitHub is unavailable.")
         expect(page.locator(NOTES)).to_have_value("Fictional edit queued before Lock while GitHub is unavailable.")
-        page.locator("#lock-button").click()
+        lock_library(page)
         expect(page.locator("#lock-screen")).to_be_visible()
         locked_cache = page.evaluate("""async () => {
           const db=await new Promise(resolve=>{const r=indexedDB.open('reading-terminal-cache');r.onsuccess=()=>resolve(r.result)});
@@ -865,7 +1140,7 @@ def setup_unlock_remember_lock(browser, base):
         repo.public_vault_error = True
         page.reload()
         vault_library(page)
-        page.locator("#lock-button").click()
+        lock_library(page)
         expect(page.locator("#lock-screen")).to_be_visible()
         page.reload()
         expect(page.locator("#lock-screen")).to_be_visible()
@@ -904,21 +1179,35 @@ def setup_replacement_and_invalidation(browser, base):
           const {loadRemembered}=await import('./js/session.js'); return await loadRemembered() === null;
         }"""), "Replacing the vault identity did not delete the remembered device record")
         expect(page.locator("#lock-screen")).to_be_visible()
-        page.goto(base + "/#setup")
+        options = page.locator("#lock-other-options")
+        assert not options.evaluate("el => el.open")
+        expect(options.locator('a[href="#replace"]')).not_to_be_visible()
+        options.locator("summary").click()
+        expect(options.locator('a[href="#setup"]')).to_be_visible()
+        options.locator('a[href="#setup"]').click()
         expect(page.locator("#setup-screen")).to_be_visible()
-        expect(page.locator("#setup-screen")).to_contain_text("existing passkeys will stop working")
-        expect(page.locator("#setup-replace")).not_to_be_checked()
+        expect(page.locator("#replace-screen")).not_to_be_visible()
+        expect(page.locator("#setup-form")).not_to_be_visible()
+        expect(page.locator('#setup-existing a[href="#replace"]')).to_be_visible()
+        assert not repo.vault_puts, "Setup overwrote an existing vault"
+        page.goto(base + "/#replace")
+        expect(page.locator("#replace-screen")).to_be_visible()
+        expect(page.locator("#setup-screen")).not_to_be_visible()
+        expect(page.locator("#replace-confirm")).to_have_value("")
+        for invalid in ("", "replace", "REPLACE ", " REPLACE"):
+            fill_setup(page, NEW_PASSWORD)
+            page.locator("#replace-confirm").fill(invalid)
+            page.locator("#setup-form").evaluate("form => form.requestSubmit()")
+            expect(page.locator("#replace-screen")).to_be_visible()
+            assert not repo.vault_puts, "Replacement accepted a non-exact confirmation"
+            assert repo.vault["vault_id"] == replacement["vault_id"]
         fill_setup(page, NEW_PASSWORD)
-        page.locator("#setup-submit").click()
-        expect(page.locator("#setup-error")).not_to_be_empty()
-        assert not repo.vault_puts, "Setup overwrote an existing vault without explicit permission"
-        page.locator("#setup-replace").check()
-        fill_setup(page, NEW_PASSWORD)
+        page.locator("#replace-confirm").fill("REPLACE")
         page.locator("#setup-submit").click()
         vault_library(page)
         assert len(repo.vault_puts) == 1 and repo.vault_puts[0].get("sha")
         assert repo.vault["vault_id"] != replacement["vault_id"]
-        page.locator("#lock-button").click()
+        lock_library(page)
         unlock_password(page, NEW_PASSWORD)
 
 
@@ -928,7 +1217,7 @@ def security_password_remove_conflicts(browser, base):
         original_slot = next(slot for slot in initial["slots"] if slot["type"] == "passkey")
         page.goto(base + "/")
         unlock_password(page)
-        page.locator("#settings-open").click()
+        menu_action(page, "#settings-open")
         expect(page.locator("#security-section")).to_be_visible()
         page.locator("#security-section summary").filter(has_text="Change password").click()
 
@@ -939,7 +1228,7 @@ def security_password_remove_conflicts(browser, base):
             page.locator("#change-password-submit").click()
 
         change("Wrong fictional password")
-        expect(page.locator("#security-status")).to_have_text("That password did not unlock the library.")
+        expect(page.locator("#change-password-submit")).to_be_enabled()
         assert not repo.vault_puts
         for selector in ("#current-password", "#new-password", "#confirm-password"):
             expect(page.locator(selector)).to_have_value("")
@@ -978,16 +1267,30 @@ def security_password_remove_conflicts(browser, base):
                "slotId": original_slot["id"]})
         assert crypto_check == {"oldRejected": True, "token": TOKEN, "passkeyToken": TOKEN}
         remove = page.locator(f'#passkey-list button[data-slot-id="{original_slot["id"]}"]')
-        page.once("dialog", lambda dialog: dialog.dismiss())
         remove.click()
-        assert len(repo.vault_puts) == 2, "Canceled removal committed a vault"
+        expect(remove).to_have_count(0)
+        page.wait_for_timeout(5000)
+        assert len(repo.vault_puts) == 2, "Removal published before its six-second Undo window"
+        page.locator("#toast .toast-message").get_by_role("button", name="Undo", exact=True).click()
+        expect(remove).to_be_visible()
+        page.wait_for_timeout(1200)
+        assert len(repo.vault_puts) == 2, "Undone removal committed a vault"
         repo.vault_conflict_status = 422
         repo.vault_conflict = json.loads(json.dumps(repo.vault))
         repo.vault_conflict["updated_at"] = "2099-01-01T00:00:00.000Z"
-        page.once("dialog", lambda dialog: dialog.accept())
+        other_slot = next(s for s in repo.vault["slots"] if s["type"] == "passkey" and s["id"] != original_slot["id"])
         remove.click()
         expect(remove).to_have_count(0)
-        assert len(repo.vault_puts) == 4, "Removal did not retry exactly once"
+        page.wait_for_timeout(3500)
+        other_remove = page.locator(f'#passkey-list button[data-slot-id="{other_slot["id"]}"]')
+        other_remove.click()
+        assert len(repo.vault_puts) == 2, "First removal published before six seconds"
+        wait_until(page, lambda: len(repo.vault_puts) == 4, "Expired removal did not retry its conflict")
+        # The second notice must retain its own full window when the first expires.
+        page.locator("#toast .toast-message").get_by_role("button", name="Undo", exact=True).click()
+        expect(other_remove).to_be_visible()
+        page.wait_for_timeout(3500)
+        assert len(repo.vault_puts) == 4, "Removal did not retry exactly once, or Undo committed"
         remaining = [s for s in repo.vault["slots"] if s["type"] == "passkey"]
         assert len(remaining) == 1 and remaining[0]["id"] != original_slot["id"]
         assert sum(s["type"] == "password" for s in repo.vault["slots"]) == 1
@@ -995,12 +1298,20 @@ def security_password_remove_conflicts(browser, base):
         no_browser_secrets(page)
         page.reload()
         vault_library(page)
-        page.locator("#settings-open").click()
+        menu_action(page, "#settings-open")
         expect(page.locator("#passkey-list button[data-slot-id]")).to_have_count(1)
         expect(page.locator("#passkey-list")).to_contain_text(remaining[0]["label"])
+        pending_remove = page.locator("#passkey-list button[data-slot-id]")
+        pending_remove.click()
+        expect(pending_remove).to_have_count(0)
         page.locator('#settings-dialog [data-close]').click()
-        page.locator("#lock-button").click()
+        lock_library(page)
         unlock_password(page, NEW_PASSWORD)
+        page.wait_for_timeout(6200)
+        assert len(repo.vault_puts) == 4, "A removal from the locked session committed later"
+        menu_action(page, "#settings-open")
+        expect(page.locator("#passkey-list button[data-slot-id]")).to_have_count(1)
+        page.locator('#settings-dialog [data-close]').click()
 
 
 def lock_during_search(browser, base):
@@ -1012,7 +1323,7 @@ def lock_during_search(browser, base):
         page.route("**/contents/search-index.json*", lambda route: pending.append(route))
         page.locator("#search").fill("orchard")
         wait_until(page, lambda: bool(pending), "Search did not start before Lock")
-        page.locator("#lock-button").click()
+        lock_library(page)
         expect(page.locator("#lock-screen")).to_be_visible()
         for route in pending:
             route.abort()
@@ -1040,7 +1351,7 @@ def replacement_during_security_work(browser, base):
             return derive(...args);
           };
         }""")
-        page.locator("#settings-open").click()
+        menu_action(page, "#settings-open")
         page.locator("#security-section summary").click()
         page.locator("#current-password").fill(PASSWORD)
         page.locator("#new-password").fill(NEW_PASSWORD)
@@ -1070,15 +1381,15 @@ def cdp_passkey_unlock(browser, base):
                 "protocol": "ctap2", "ctap2Version": "ctap2_1", "transport": "internal",
                 "hasResidentKey": True, "hasUserVerification": True, "isUserVerified": True,
                 "hasPrf": True, "automaticPresenceSimulation": True}})["authenticatorId"]
-            page.locator("#settings-open").click()
+            menu_action(page, "#settings-open")
             page.locator("#passkey-label").fill("Fictional CDP authenticator")
             page.locator("#add-passkey").click()
-            expect(page.locator("#security-status")).to_contain_text("Security updated.", timeout=30000)
+            wait_until(page, lambda: len(repo.vault_puts) == 1, "Passkey registration did not publish", timeout=30000)
             assert len(repo.vault_puts) == 1, "Passkey registration did not commit the vault"
             assert sum(slot["type"] == "passkey" for slot in repo.vault["slots"]) == 1
             expect(page.locator("#passkey-list")).to_contain_text("Fictional CDP authenticator")
             page.locator('#settings-dialog [data-close]').click()
-            page.locator("#lock-button").click()
+            lock_library(page)
             expect(page.locator("#unlock-passkey")).to_be_visible()
             page.locator("#unlock-passkey").click()
             vault_library(page)
@@ -1100,7 +1411,8 @@ def main():
         browser = playwright.chromium.launch(executable_path="/usr/bin/google-chrome", headless=True, args=["--no-sandbox"])
         try:
             for scenario in (navigation_media_layout, indexed_search, debounce_status_and_growth,
-                             highlight_drag_and_persistence, keyboard_stars_and_read,
+                             highlight_drag_and_persistence, keyboard_stars_and_read, phase_one_surface,
+                             selection_toolbar_and_undo, automatic_status_undo_and_typing, relative_sync_timer,
                              mobile_and_demo, store_conflict_export_import, setup_unlock_remember_lock,
                              setup_replacement_and_invalidation, security_password_remove_conflicts,
                              lock_during_search, replacement_during_security_work, cdp_passkey_unlock):

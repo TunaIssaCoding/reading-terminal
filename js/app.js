@@ -16,10 +16,33 @@ let store, libraryItems = [], state = {}, meta = {}, active = null, notes = empt
 let openVersion = 0, connectionVersion = 0, query = '', tag = '', starredOnly = false, searchVersion = 0;
 let articleReady = false;
 let bodies = new Map(), searchIndex = new Map(), notesCache = new Map(), summaries = new Map();
-let toastTimer;
-function notify(message) {
-  $('#toast').textContent = message; $('#toast').hidden = false;
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('#toast').hidden = true; }, 5500);
+let syncedAt = null;
+function updateSyncTime() {
+  if (!syncedAt || $('#sync-status').dataset.status !== 'synced') return;
+  const minutes = Math.max(0, Math.floor((Date.now() - syncedAt.getTime()) / 60000));
+  const age = minutes < 1 ? 'just now' : minutes < 60 ? `${minutes} min ago`
+    : minutes < 1440 ? `${Math.floor(minutes / 60)} hr ago` : `${Math.floor(minutes / 1440)} days ago`;
+  $('#sync-status').textContent = `Synced ${age}`;
+  $('#sync-status').title = syncedAt.toLocaleString();
+}
+setInterval(updateSyncTime, 15000);
+const notices = new Set();
+function placeToasts() { (document.querySelector('dialog[open]') || document.body).append($('#toast')); }
+function notify(message, { undo, commit } = {}) {
+  const root = $('#toast'), entry = text('div', '', 'toast-message');
+  entry.append(text('span', message));
+  let timer;
+  const dismiss = () => {
+    clearTimeout(timer); notices.delete(dismiss); entry.remove(); root.hidden = !root.childElementCount;
+  };
+  if (undo) {
+    const button = text('button', 'Undo'); button.type = 'button';
+    button.addEventListener('click', () => { dismiss(); persist(Promise.resolve().then(undo)); });
+    entry.append(button);
+  }
+  notices.add(dismiss); root.append(entry); root.hidden = false; placeToasts();
+  timer = setTimeout(() => { dismiss(); if (commit) persist(Promise.resolve().then(commit)); }, 6000);
+  return dismiss;
 }
 function handleError(error) { notify(error.message || String(error)); }
 const persist = promise => Promise.resolve(promise).catch(handleError);
@@ -27,12 +50,12 @@ const library = new Library({ root: $('#library'), onOpen: openArticle, onStar: 
 const pane = new NotesPane({ root: $('#notes-content'), onChange: value => {
   if (!active) return;
   notes.long_notes = value; notes.long_notes_updated_at = now(); saveNotes();
-}, onOpen: openArticle });
+}, onOpen: openArticle, notify });
 const reader = new Reader({ root: $('#article-body'), warnings: $('#anchor-warnings'), onChange: highlights => {
   if (!active) return;
   notes.highlights = highlights; pane.updateMargins(highlights.filter(h => !h.deleted)); saveNotes();
 }, onQuote: quote => { showDrawer('notes'); pane.appendQuote(quote); }, onOpen: openArticle,
-getAsset: path => store.getAsset(path, active ? `articles/${active.slug}.md` : ''), notify });
+getAsset: path => store.getAsset(path, active ? `articles/${active.slug}.md` : ''), notify, onDelete: deleteHighlight });
 
 function items() {
   return libraryItems.map(item => ({ ...item, status: item.status || 'unread', ...state[item.id], notes: notesCache.get(item.slug) }));
@@ -50,6 +73,18 @@ function setStatus(id, status, commentedFrom = null) {
   const timestamp = now();
   state[item.id] = { ...state[item.id], status, commented_from: commentedFrom, status_changed_at: timestamp, status_updated_at: timestamp };
   saveState();
+}
+const autoReadUndone = new Set();
+function automaticStatus(id, status, commentedFrom = null) {
+  const before = currentItem(id), currentStore = store;
+  if (!before || before.status === status) return;
+  setStatus(id, status, commentedFrom);
+  const changedAt = state[id].status_updated_at;
+  return notify(`Marked ${status} automatically.`, { undo: () => {
+    if (store !== currentStore || state[id]?.status_updated_at !== changedAt) return;
+    if (status === 'read') autoReadUndone.add(String(id));
+    setStatus(id, before.status, before.commented_from || null);
+  } });
 }
 function toggleRead() {
   const item = currentItem(); if (!item) return;
@@ -76,9 +111,34 @@ function saveNotes() {
   persist(store.saveNotes(active.slug, notes));
   const item = currentItem();
   const hasNotes = notes.long_notes.trim() || notes.highlights.some(h => !h.deleted && h.note?.trim());
-  if (hasNotes && item.status !== 'commented') setStatus(item.id, 'commented', item.status);
-  else if (!hasNotes && item.status === 'commented' && item.commented_from) setStatus(item.id, item.commented_from);
+  if (hasNotes && item.status !== 'commented') automaticStatus(item.id, 'commented', item.status);
+  else if (!hasNotes && item.status === 'commented' && item.commented_from) automaticStatus(item.id, item.commented_from);
   else renderLibrary();
+}
+function deleteHighlight(highlight) {
+  if (!active) return;
+  const slug = active.slug, id = active.id, currentStore = store, before = currentItem(id);
+  notes.highlights = notes.highlights.filter(item => item.id !== highlight.id);
+  reader.close(); reader.updateHighlights(notes.highlights); pane.updateMargins(notes.highlights);
+  saveNotes();
+  const deletionStatusTime = state[id]?.status_updated_at;
+  notify('Highlight deleted.', { undo: async () => {
+    if (store !== currentStore) return;
+    const restored = structuredClone(notesCache.get(slug) || await currentStore.getNotes(slug));
+    restored.highlights = restored.highlights.filter(item => item.id !== highlight.id);
+    restored.highlights.push({ ...highlight, deleted: false, updated_at: now() });
+    if (restored.deleted_highlights) delete restored.deleted_highlights[highlight.id];
+    restored.updated_at = now(); notesCache.set(slug, restored);
+    await currentStore.saveNotes(slug, restored);
+    if (store !== currentStore) return;
+    if (state[id]?.status_updated_at === deletionStatusTime && currentItem(id)?.status !== before.status) {
+      setStatus(id, before.status, before.commented_from || null);
+    }
+    if (active?.slug === slug) {
+      notes = restored; reader.updateHighlights(notes.highlights); pane.updateMargins(reader.getHighlights());
+    }
+    renderLibrary();
+  } });
 }
 function filterTag(value) { tag = tag === value ? '' : value; renderLibrary(); showDrawer('library'); }
 function externalLink(label, href) {
@@ -117,7 +177,11 @@ function renderHeader(item) {
     const button = text('button', value, 'tag-chip'); button.addEventListener('click', () => filterTag(value)); tags.append(button);
   }
   root.append(tags);
-  if (item.summary) root.append(text('div', item.summary, 'article-summary'));
+  if (item.summary) {
+    const summary = text('section', '', 'article-summary bot-content');
+    summary.append(text('div', `Summary · from intake${item.summary_by ? ` · ${item.summary_by}` : ''}`, 'bot-label'), text('p', item.summary));
+    root.append(summary);
+  }
 }
 function renderImages(item) {
   $('#article-header .article-images')?.remove();
@@ -138,6 +202,10 @@ function renderImages(item) {
   }
   $('#article-header').append(strip);
 }
+function articleSlug() {
+  const match = location.hash.match(/^#(?:demo&)?article=(.*)$/);
+  return match ? decodeURIComponent(match[1]) : '';
+}
 async function openArticle(id, navigation = 'push') {
   const item = currentItem(id) || items().find(item => item.slug === id);
   if (!item) { notify('That article is not in this library.'); return; }
@@ -148,7 +216,7 @@ async function openArticle(id, navigation = 'push') {
   reader.setArticle('', []); $('#article-body').append(text('p', 'Opening article…', 'loading-message'));
   pane.setArticle(null); closeDrawers(); $('#reader-pane').scrollTop = 0;
   $('#reader-position').textContent = `${String(libraryItems.indexOf(libraryItems.find(i => i.id === item.id)) + 1).padStart(2, '0')} / ${String(libraryItems.length).padStart(2, '0')}   ·   THE READING ROOM`;
-  const hash = `#article=${encodeURIComponent(item.slug)}`;
+  const hash = `#${store.demo ? 'demo&' : ''}article=${encodeURIComponent(item.slug)}`;
   if (navigation === 'replace') history.replaceState(null, '', hash);
   else if (navigation === 'push' && location.hash !== hash) history.pushState(null, '', hash);
   // Opens are not edits: include this timestamp only with the next real state change.
@@ -179,13 +247,15 @@ async function connect(settings = getSettings()) {
   const version = ++connectionVersion; ++openVersion; ++searchVersion;
   store?.dispose();
   store = new ReadingStore(settings); const currentStore = store;
+  autoReadUndone.clear(); syncedAt = null;
   libraryItems = []; state = {}; active = null; bodies = new Map(); searchIndex = new Map(); notesCache = new Map(); summaries = new Map();
   $('#mode-badge').textContent = settings.token ? 'PRIVATE' : 'DEMO';
   store.addEventListener('change', event => {
     if (store !== currentStore) return;
-    $('#sync-status').textContent = event.detail.message;
-    $('#sync-status').dataset.status = event.detail.status;
-    $('#sync-status').title = event.detail.message;
+    const { status, message } = event.detail;
+    $('#sync-status').dataset.status = status;
+    if (status === 'synced') { syncedAt = new Date(); updateSyncTime(); }
+    else { $('#sync-status').textContent = message; $('#sync-status').title = message; }
   });
   store.addEventListener('state-updated', event => {
     if (store !== currentStore) return;
@@ -222,7 +292,7 @@ async function connect(settings = getSettings()) {
     if (version !== connectionVersion) return;
     libraryItems = initial.library; state = initial.state || {}; meta = initial.meta || {};
     renderLibrary();
-    const slug = location.hash.startsWith('#article=') ? decodeURIComponent(location.hash.slice(9)) : '';
+    const slug = articleSlug();
     const first = libraryItems.find(item => item.slug === slug) || currentItem(library.visibleIds()[0]) || libraryItems[0];
     if (first) await openArticle(first.id, 'replace');
     else {
@@ -255,7 +325,7 @@ async function disconnect() {
   reader.close(); reader.setArticle('', []); pane.setArticle(null); $('#article-header').replaceChildren();
   renderLibrary(); updateReaderButtons(); closeDrawers();
   $('#reader-position').textContent = 'THE READING ROOM'; $('#sync-status').textContent = '';
-  $('#toast').hidden = true; clearTimeout(toastTimer);
+  closeMore(); for (const dismiss of [...notices]) dismiss();
   if (previous) await previous.lock();
 }
 
@@ -294,16 +364,48 @@ $('#tag-filter').addEventListener('click', () => { tag = ''; renderLibrary(); })
 $('#read-toggle').addEventListener('click', toggleRead);
 $('#reader-star').addEventListener('click', () => toggleStar());
 $('#reader-pane').addEventListener('scroll', () => {
-  reader.closeActions();
+  if (!articleReady) return;
   const paneEl = $('#reader-pane'), bodyEl = $('#article-body');
   const bodyStart = bodyEl.getBoundingClientRect().top - paneEl.getBoundingClientRect().top + paneEl.scrollTop;
   const progress = Math.max(0, Math.min(1, (paneEl.scrollTop + paneEl.clientHeight - bodyStart) / Math.max(1, bodyEl.offsetHeight)));
   $('#reading-progress').textContent = `${Math.round(progress * 100)}%`;
-  if (paneEl.scrollTop > 0 && progress >= .9 && currentItem()?.status === 'unread') setStatus(active.id, 'read');
+  if (paneEl.scrollTop > 0 && progress >= .9 && currentItem()?.status === 'unread' && !autoReadUndone.has(String(active.id))) automaticStatus(active.id, 'read');
 }, { passive: true });
 
 const drawerMedia = matchMedia('(max-width: 860px)');
 const mobile = () => drawerMedia.matches;
+function closeMore(restoreFocus = false) {
+  $('#more-menu').hidden = true; $('#view-menu').hidden = true;
+  $('#more-toggle').setAttribute('aria-expanded', 'false');
+  $('#view-toggle').setAttribute('aria-expanded', 'false');
+  if (restoreFocus) $('#more-toggle').focus();
+}
+$('#more-toggle').addEventListener('click', () => {
+  const opening = $('#more-menu').hidden;
+  closeMore();
+  if (opening) {
+    reader.closeActions(); $('#more-menu').hidden = false;
+    $('#more-toggle').setAttribute('aria-expanded', 'true'); $('#view-toggle').focus();
+  }
+});
+$('#view-toggle').addEventListener('click', () => {
+  $('#view-menu').hidden = !$('#view-menu').hidden;
+  $('#view-toggle').setAttribute('aria-expanded', String(!$('#view-menu').hidden));
+});
+document.addEventListener('pointerdown', event => {
+  const target = event.target.nodeType === Node.ELEMENT_NODE ? event.target : event.target.parentElement;
+  if (!target?.closest('.topbar-more')) closeMore();
+  document.querySelectorAll('.item-status-menu[open]').forEach(menu => {
+    if (!menu.contains(event.target)) menu.open = false;
+  });
+});
+function arrangeTopbar() {
+  const destination = mobile() ? $('#mobile-extras') : $('.topbar');
+  for (const id of ['mode-badge', 'sync-status', 'lock-button']) {
+    if (mobile()) destination.append($('#' + id));
+    else destination.insertBefore($('#' + id), id === 'mode-badge' ? $('.topbar-spacer') : $('.topbar-more'));
+  }
+}
 function showDrawer(which) {
   if (!mobile()) return;
   document.body.classList.toggle('library-open', which === 'library');
@@ -333,9 +435,14 @@ $('#library-toggle').addEventListener('click', () => {
 });
 $('#notes-toggle').addEventListener('click', () => { if (document.body.classList.contains('notes-open')) closeDrawers(); else showDrawer('notes'); });
 $('#notes-close').addEventListener('click', closeDrawers); $('#drawer-backdrop').addEventListener('click', closeDrawers);
-drawerMedia.addEventListener('change', closeDrawers);
+drawerMedia.addEventListener('change', () => { closeDrawers(); closeMore(); arrangeTopbar(); });
+arrangeTopbar();
 let theme = localStorage.getItem('reading-theme') || 'dark';
-function setTheme() { document.documentElement.dataset.theme = theme; $('#theme-toggle').setAttribute('aria-label', `Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`); }
+function setTheme() {
+  document.documentElement.dataset.theme = theme;
+  $('#theme-toggle').textContent = `${theme === 'dark' ? 'Dark' : 'Light'} theme`;
+  $('#theme-toggle').setAttribute('aria-label', `Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`);
+}
 setTheme();
 $('#theme-toggle').addEventListener('click', () => { theme = theme === 'dark' ? 'light' : 'dark'; localStorage.setItem('reading-theme', theme); setTheme(); });
 let width = Math.max(22, Math.min(50, Number(localStorage.getItem('reading-notes-width')) || 30));
@@ -348,21 +455,30 @@ $('#notes-resizer').addEventListener('pointerup', endResize); $('#notes-resizer'
 $('#notes-resizer').addEventListener('keydown', e => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); setWidth(width + (e.key === 'ArrowLeft' ? 1 : -1)); endResize(); } });
 
 function showSettings() {
+  closeMore(); $('#advanced-connection').open = false;
   const settings = getSettings();
   for (const key of ['owner', 'repo', 'branch', 'token']) $('#settings-form').elements[key].value = settings[key] || '';
   access.renderSecurity();
-  $('#connection-result').textContent = ''; $('#settings-dialog').showModal();
+  $('#connection-result').textContent = ''; $('#settings-dialog').showModal(); placeToasts();
 }
 function formSettings() { return Object.fromEntries(['owner', 'repo', 'branch', 'token'].map(key => [key, $('#settings-form').elements[key].value.trim()])); }
 $('#settings-open').addEventListener('click', showSettings);
-$('#help-open').addEventListener('click', () => $('#help-dialog').showModal());
+function showHelp() { closeMore(); $('#help-dialog').showModal(); placeToasts(); }
+$('#help-open').addEventListener('click', showHelp);
 document.querySelectorAll('[data-close]').forEach(button => button.addEventListener('click', () => button.closest('dialog').close()));
+document.querySelectorAll('dialog').forEach(dialog => {
+  dialog.addEventListener('close', placeToasts);
+  dialog.addEventListener('click', event => {
+    const rect = dialog.getBoundingClientRect();
+    if (event.target === dialog && (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom)) dialog.close();
+  });
+});
 $('#test-connection').addEventListener('click', async e => {
-  e.target.disabled = true; $('#connection-result').textContent = 'Testing private repository access…';
+  e.target.disabled = true; e.target.textContent = 'Testing…';
   const test = new ReadingStore(formSettings());
-  try { const result = await test.testConnection(); $('#connection-result').textContent = result.message; }
-  catch (error) { $('#connection-result').textContent = error.message; }
-  finally { test.dispose(); e.target.disabled = false; }
+  try { const result = await test.testConnection(); notify(result.message); }
+  catch (error) { handleError(error); }
+  finally { test.dispose(); e.target.disabled = false; e.target.textContent = 'Test connection'; }
 });
 $('#settings-form').addEventListener('submit', async e => {
   e.preventDefault();
@@ -379,30 +495,54 @@ $('#export-data').addEventListener('click', async e => {
     const url = URL.createObjectURL(blob), link = document.createElement('a'); link.href = url;
     link.download = `reading-backup-${data.complete ? '' : 'PARTIAL-'}${new Date().toISOString().slice(0, 10)}.json`;
     link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
-    $('#connection-result').textContent = data.complete
+    notify(data.complete
       ? 'Complete backup exported without the connection token.'
-      : `Partial backup exported: cached notes are safe, but remote data was unavailable. Reconnect and export again. ${data.warnings.join(' ')}`;
-  } catch (error) { $('#connection-result').textContent = error.message; }
+      : `Partial backup exported: cached notes are safe, but remote data was unavailable. Reconnect and export again. ${data.warnings.join(' ')}`);
+  } catch (error) { handleError(error); }
   finally { e.target.disabled = false; }
 });
 $('#import-data').addEventListener('change', async e => {
   const file = e.target.files[0]; if (!file) return;
-  try { await store.importData(JSON.parse(await file.text())); $('#connection-result').textContent = 'Backup merged and saved locally.'; }
-  catch (error) { $('#connection-result').textContent = `Import failed: ${error.message}`; }
+  try { await store.importData(JSON.parse(await file.text())); notify('Backup merged and saved locally.'); }
+  catch (error) { notify(`Import failed: ${error.message}`); }
   e.target.value = '';
 });
+function closeArticle() {
+  ++openVersion; active = null; articleReady = false; notes = emptyNotes(); bot = '';
+  reader.close(); reader.setArticle('', []); pane.setArticle(null);
+  $('#article-header').replaceChildren(text('h1', 'Choose something to read.'));
+  $('#reader-position').textContent = 'THE READING ROOM'; $('#reading-progress').textContent = '';
+  history.pushState(null, '', store?.demo ? '#demo' : location.pathname + location.search);
+  renderLibrary(); updateReaderButtons();
+  if (mobile()) showDrawer('library');
+  else { document.body.classList.remove('sidebar-collapsed'); closeDrawers(); library.move(0); }
+}
 document.addEventListener('keydown', e => {
-  if (access.blocked || access.busy) return;
+  if (access.blocked || access.busy || e.defaultPrevented || e.isComposing) return;
+  const editing = e.target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="textbox"]');
+  if (editing || e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.key === 'Escape') {
-    reader.closeActions();
-    document.querySelectorAll('.item-status-menu[open]').forEach(menu => { menu.open = false; });
-    closeDrawers(); if (!e.target.closest('textarea,input,[contenteditable="true"]')) reader.close(); return;
+    if (document.querySelector('dialog[open]')) return;
+    e.preventDefault();
+    if (!$('#more-menu').hidden) { closeMore(true); return; }
+    const statusMenus = document.querySelectorAll('.item-status-menu[open]');
+    if (statusMenus.length) { statusMenus.forEach(menu => { menu.open = false; }); return; }
+    if (!$('#selection-actions').hidden) { reader.closeActions(); return; }
+    if (document.body.matches('.library-open, .notes-open')) { closeDrawers(); return; }
+    if (reader.active) { reader.close(); return; }
+    if (active) closeArticle();
+    return;
   }
-  if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest('input,textarea,select,[contenteditable="true"]') || document.querySelector('dialog[open]')) return;
+  if (document.querySelector('dialog[open]') || !$('#more-menu').hidden) return;
+  const move = delta => {
+    if (mobile()) showDrawer('library');
+    else { document.body.classList.remove('sidebar-collapsed'); closeDrawers(); }
+    library.move(delta);
+  };
   const actions = {
-    j: () => library.move(1), k: () => library.move(-1), r: toggleRead, s: () => toggleStar(),
+    j: () => move(1), k: () => move(-1), r: toggleRead, s: () => toggleStar(),
     h: () => reader.highlight(), n: () => { showDrawer('notes'); pane.focus(); },
-    '/': () => { showDrawer('library'); $('#search').focus(); }, '?': () => $('#help-dialog').showModal()
+    '/': () => { if (!mobile()) { document.body.classList.remove('sidebar-collapsed'); closeDrawers(); } showDrawer('library'); $('#search').focus(); }, '?': showHelp
   };
   if (e.key === 'Enter' && (!e.target.closest('button,a,summary') || e.target.matches('.library-title'))) {
     e.preventDefault(); library.openFocused();
@@ -410,9 +550,9 @@ document.addEventListener('keydown', e => {
 });
 function restoreArticle() {
   if (access.blocked || !store) return;
-  if (!location.hash.startsWith('#article=')) return;
+  if (!/^#(?:demo&)?article=/.test(location.hash)) return;
   try {
-    const slug = decodeURIComponent(location.hash.slice(9));
+    const slug = articleSlug();
     if (active?.slug !== slug) void openArticle(slug, 'restore');
   } catch { notify('Invalid article link.'); }
 }

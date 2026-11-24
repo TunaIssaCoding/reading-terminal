@@ -26,6 +26,7 @@ export class VaultAccess {
   constructor({ connect, disconnect, notify }) {
     this.connect = connect; this.disconnect = disconnect; this.notify = notify;
     this.session = null; this.vault = null; this.remember = false; this.busy = false; this.generation = 0;
+    this.pendingRemovals = new Map();
     $('#unlock-form').addEventListener('submit', event => { event.preventDefault(); void this.unlock(false); });
     $('#unlock-passkey').addEventListener('click', () => { void this.unlock(true); });
     $('#unlock-retry').addEventListener('click', () => { void this.start(); });
@@ -37,20 +38,34 @@ export class VaultAccess {
       $(input).addEventListener('input', () => { $(hint).textContent = `${strength($(input).value)} · Use 4 or 5 random words.`; });
     }
     document.querySelectorAll('[data-demo]').forEach(link => link.addEventListener('click', event => { event.preventDefault(); void this.demo(); }));
-    $('#setup-back').addEventListener('click', event => { event.preventDefault(); history.replaceState(null, '', location.pathname + location.search); void this.start(); });
+    document.querySelectorAll('[data-auth-back]').forEach(link => link.addEventListener('click', event => {
+      event.preventDefault();
+      if (this.busy) return;
+      history.replaceState(null, '', location.pathname + location.search); void this.start();
+    }));
     $('#settings-setup').addEventListener('click', event => {
-      event.preventDefault(); $('#settings-dialog').close();
+      event.preventDefault();
+      if (this.busy) return;
+      $('#settings-dialog').close();
       if (location.hash !== '#setup') history.pushState(null, '', '#setup');
       void this.openSetup();
     });
-    window.addEventListener('hashchange', () => { if (location.hash === '#setup') void this.openSetup(); });
-    $('#settings-dialog').addEventListener('close', () => clearInputs('#current-password', '#new-password', '#confirm-password'));
+    window.addEventListener('hashchange', () => {
+      if (location.hash === '#setup' || location.hash === '#replace') void this.openSetup(location.hash === '#replace');
+      else if (location.hash === '#demo') void this.demo();
+      else if (this.blocked) void this.start();
+    });
+    $('#settings-dialog').addEventListener('close', () => {
+      clearInputs('#current-password', '#new-password', '#confirm-password');
+      $('#advanced-connection').open = false;
+    });
   }
   get unlocked() { return Boolean(this.session); }
   get blocked() { return document.body.classList.contains('auth-blocked'); }
   message(error, fallback = 'The operation could not be completed. Please try again.') {
     let message = error instanceof Error ? error.message : fallback;
     if (message === PASSWORD_ERROR) return PASSWORD_ERROR;
+    if (message.startsWith('A vault already exists.')) return 'A vault already exists. Use Replace vault to replace it; setup never overwrites an existing vault.';
     // Never show an accidentally echoed credential, including errors from a browser API.
     for (const secret of [this.session?.payload.token, ...[...document.querySelectorAll('input[type="password"]')].map(input => input.value)]) {
       if (secret) message = message.split(secret).join('[redacted]');
@@ -58,32 +73,45 @@ export class VaultAccess {
     return message || fallback;
   }
   show(screen) {
-    $('#lock-screen').hidden = screen !== 'lock'; $('#setup-screen').hidden = screen !== 'setup';
+    $('#lock-screen').hidden = screen !== 'lock'; $('#setup-screen').hidden = screen !== 'setup'; $('#replace-screen').hidden = screen !== 'replace';
+    if (screen === 'setup' || screen === 'replace') {
+      const replacing = screen === 'replace';
+      $(replacing ? '#replace-form-host' : '#setup-form-host').append($('#vault-form-content'));
+      $('#vault-form-content').hidden = !replacing && Boolean(this.vault);
+      $('#setup-existing').hidden = !this.vault;
+      $('#replace-fields').hidden = !replacing;
+      $('#replace-confirm').disabled = !replacing;
+      $('#replace-confirm').value = '';
+      $('#setup-submit').textContent = replacing ? 'Replace vault and unlock' : 'Create vault and unlock';
+      $('#setup-error').textContent = ''; $('#setup-status').textContent = '';
+    }
     document.body.classList.toggle('auth-blocked', Boolean(screen));
     $('.topbar').inert = Boolean(screen); $('.workspace').inert = Boolean(screen);
     if (screen) {
       document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
-      $('#selection-actions').hidden = true; $('#selection-menu').hidden = true;
+      $('#selection-actions').hidden = true;
     }
     $('#lock-button').hidden = !this.unlocked;
-    $('#security-section').hidden = !this.unlocked;
+    this.renderSecurity();
   }
   async showLock(message = '') {
     this.show('lock'); $('#unlock-error').textContent = message;
+    $('#lock-other-options').open = false;
     $('#unlock-submit').disabled = !this.vault; $('#unlock-password').disabled = !this.vault;
     $('#unlock-retry').hidden = !message;
     $('#unlock-passkey').hidden = true;
     const vault = this.vault;
-    if (vault && await passkeysAvailable(vault) && this.blocked && !$('#lock-screen').hidden && this.vault === vault) $('#unlock-passkey').hidden = false;
+    if (vault && navigator.credentials && await passkeysAvailable(vault) && this.blocked && !$('#lock-screen').hidden && this.vault === vault) $('#unlock-passkey').hidden = false;
   }
   async start() {
     if (this.busy) return;
-    if (location.hash === '#demo') return this.demo();
+    this.cancelPendingRemovals();
+    if (location.hash === '#demo' || location.hash.startsWith('#demo&article=')) return this.demo();
     const generation = ++this.generation;
     $('#unlock-error').textContent = 'Loading vault…';
     const restored = this.session || await loadRemembered();
     if (generation !== this.generation) return;
-    if (restored && location.hash !== '#setup') {
+    if (restored && location.hash !== '#setup' && location.hash !== '#replace') {
       await this.accept(restored, true);
       if (generation !== this.generation) return;
       // A remembered library opens first; publication/replacement is checked in the background.
@@ -101,7 +129,7 @@ export class VaultAccess {
       const vault = await fetchPublicVault();
       if (generation !== this.generation) return;
       this.vault = vault;
-      if (location.hash === '#setup') this.show('setup');
+      if (location.hash === '#setup' || location.hash === '#replace') this.show(location.hash.slice(1));
       else if (vault) await this.showLock();
       else if (getSettings().token) { this.show(null); await this.connect(getSettings()); }
       else this.show('setup');
@@ -118,6 +146,7 @@ export class VaultAccess {
     }
   }
   async accept(result, remember) {
+    this.cancelPendingRemovals();
     this.vault = result.vault; this.session = result; this.remember = remember;
     // Migrate an old manual token out of persistent settings after a successful vault unlock.
     const settings = getSettings();
@@ -129,7 +158,10 @@ export class VaultAccess {
   setBusy(value, area, label) {
     this.busy = value;
     $(area).setAttribute('aria-busy', String(value));
-    $(area).querySelectorAll('button,input').forEach(control => { control.disabled = value; });
+    $(area).querySelectorAll('button,input').forEach(control => {
+      control.disabled = value || (control.id === 'replace-confirm' && $('#replace-fields').hidden);
+    });
+    $('#security-controls').querySelectorAll('button,input').forEach(control => { control.disabled = value || !this.session; });
     $('#lock-button').disabled = value;
     if (label) label.element.textContent = value ? label.busy : label.normal;
   }
@@ -145,12 +177,14 @@ export class VaultAccess {
   }
   async setup() {
     if (this.busy) return;
-    const label = { element: $('#setup-submit'), normal: 'Create vault and unlock', busy: 'Encrypting and saving…' };
-    this.setBusy(true, '#setup-screen', label); $('#setup-error').textContent = ''; $('#setup-status').textContent = '';
+    const replacing = !$('#replace-screen').hidden, area = replacing ? '#replace-screen' : '#setup-screen';
+    const label = { element: $('#setup-submit'), normal: replacing ? 'Replace vault and unlock' : 'Create vault and unlock', busy: 'Encrypting and saving…' };
+    this.setBusy(true, area, label); $('#setup-error').textContent = ''; $('#setup-status').textContent = '';
     let created;
     try {
+      if (replacing && $('#replace-confirm').value !== 'REPLACE') throw new Error('Type REPLACE exactly to replace the vault.');
+      if (!replacing && this.vault) throw new Error('A vault already exists. Use Replace vault instead.');
       passwordRules($('#setup-password').value, $('#setup-confirm').value);
-      if (this.vault && !$('#setup-replace').checked) throw new Error('A vault already exists. Tick “Replace the existing vault” to replace it. Existing passkeys will stop working.');
       const payload = {
         token: $('#setup-token').value.trim(), owner: $('#setup-owner').value.trim(), repo: $('#setup-repo').value.trim(), branch: $('#setup-branch').value.trim(),
         site_repo: $('#setup-site-repo').value.trim(), site_branch: $('#setup-site-branch').value.trim(),
@@ -159,31 +193,35 @@ export class VaultAccess {
       const repository = await checkPrivateRepository(payload);
       if (repository.permissions?.push === false) throw new Error('The token needs Contents read and write on reading-data to sync your notes.');
       created = await createVault(payload, $('#setup-password').value);
-      await publishVault(payload, created.vault, $('#setup-replace').checked);
+      if (replacing && $('#replace-confirm').value !== 'REPLACE') throw new Error('Type REPLACE exactly to replace the vault.');
+      await publishVault(payload, created.vault, replacing);
       await this.accept(created, $('#setup-remember').checked);
       clearInputs('#setup-token');
-      $('#setup-status').textContent = SAVED; this.notify(SAVED);
+      this.notify(SAVED);
     } catch (error) { $('#setup-error').textContent = this.message(error); if (created && created !== this.session) created.dek.fill(0); }
-    finally { clearInputs('#setup-password', '#setup-confirm'); this.setBusy(false, '#setup-screen', label); }
+    finally { clearInputs('#setup-password', '#setup-confirm', '#replace-confirm'); this.setBusy(false, area, label); }
   }
-  async openSetup() {
+  async openSetup(replacing = false) {
     if (this.busy) return;
-    ++this.generation;
-    if (this.session) await this.lock();
-    else await this.disconnect();
-    this.show('setup');
+    ++this.generation; this.cancelPendingRemovals();
+    const transition = this.session ? this.lock() : this.disconnect(), generation = this.generation;
+    await transition;
+    if (generation !== this.generation) return;
+    this.show(replacing ? 'replace' : 'setup');
   }
   async demo() {
     if (this.busy) return;
-    ++this.generation;
-    if (this.session) await this.lock();
+    ++this.generation; this.cancelPendingRemovals();
+    const transition = this.session ? this.lock() : null, generation = this.generation;
+    await transition;
+    if (generation !== this.generation) return;
     this.show(null);
-    history.replaceState(null, '', location.pathname + location.search);
+    if (!location.hash.startsWith('#demo&article=')) history.replaceState(null, '', '#demo');
     await this.connect({ ...getSettings(), token: '' });
   }
   async lock(message = '', nextVault = this.vault, force = false) {
     if (this.busy && !force) return;
-    ++this.generation; this.busy = true;
+    ++this.generation; this.cancelPendingRemovals(); this.busy = true;
     $('#lock-button').disabled = true; $('#lock-button').textContent = 'Locking…';
     $('.workspace').inert = true;
     $('#unlock-submit').disabled = true; $('#unlock-passkey').hidden = true;
@@ -198,46 +236,91 @@ export class VaultAccess {
     this.setBusy(false, '#security-section'); $('#lock-button').textContent = 'Lock';
     await this.showLock(message);
   }
-  async leaveVault() { if (this.session) await this.lock(); else await deleteRemembered(); this.show(null); }
+  async leaveVault() {
+    this.cancelPendingRemovals();
+    if (this.session) await this.lock('', this.vault, true); else await deleteRemembered();
+    this.show(null);
+  }
   renderSecurity() {
-    $('#security-section').hidden = !this.session;
+    $('#security-section').hidden = false;
+    $('#security-controls').hidden = !this.session;
+    $('#security-controls').inert = !this.session;
+    $('#security-controls').querySelectorAll('button,input').forEach(control => { control.disabled = !this.session || this.busy; });
+    $('#security-unavailable').hidden = Boolean(this.session);
+    $('#security-unavailable-message').textContent = this.vault
+      ? 'Unlock your vault to manage its password and passkeys.'
+      : 'Set up a vault to protect your connection with a password and passkeys.';
     if (!this.session) return;
     $('#passkey-label').value ||= defaultPasskeyLabel();
     const list = $('#passkey-list'); list.replaceChildren();
-    for (const slot of this.vault.slots.filter(slot => slot.type === 'passkey')) {
+    for (const slot of this.vault.slots.filter(slot => slot.type === 'passkey' && !this.pendingRemovals.has(slot.id))) {
       const row = document.createElement('li'), label = document.createElement('span'), remove = document.createElement('button');
       label.textContent = `${slot.label} · ${new Date(slot.created_at).toLocaleDateString()}`;
-      remove.textContent = 'Remove'; remove.type = 'button'; remove.dataset.slotId = slot.id;
-      remove.addEventListener('click', () => { if (confirm('Remove this passkey? It will no longer unlock this library.')) void this.securityChange(() => removeSlot(this.vault, slot.id)); });
+      remove.textContent = 'Remove'; remove.type = 'button'; remove.dataset.slotId = slot.id; remove.disabled = this.busy;
+      remove.setAttribute('aria-label', `Remove ${slot.label}`);
+      remove.addEventListener('click', () => this.removePasskey(slot));
       row.append(label, remove); list.append(row);
     }
   }
-  async securityChange(makeVault) {
+  cancelPendingRemovals() {
+    for (const removal of this.pendingRemovals.values()) removal.cancelNotice?.();
+    this.pendingRemovals.clear();
+    this.renderSecurity();
+  }
+  removePasskey(slot) {
+    if (this.busy || !this.session || this.pendingRemovals.has(slot.id)) return;
+    const removal = { id: slot.id, session: this.session, generation: this.generation, ready: false };
+    this.pendingRemovals.set(slot.id, removal);
+    this.renderSecurity();
+    removal.cancelNotice = this.notify('Passkey removed. Undo to keep it.', {
+      undo: () => {
+        if (this.pendingRemovals.get(slot.id) !== removal) return;
+        this.pendingRemovals.delete(slot.id); this.renderSecurity();
+      },
+      commit: () => {
+        if (this.pendingRemovals.get(slot.id) !== removal) return;
+        removal.ready = true; void this.flushRemovals();
+      },
+    });
+  }
+  async flushRemovals() {
+    if (this.busy || !this.session) return;
+    const removal = [...this.pendingRemovals.values()].find(item => item.ready && item.session === this.session && item.generation === this.generation);
+    if (!removal) return;
+    await this.securityChange(base => removeSlot(base, removal.id), 'Passkey removed. GitHub Pages may take a minute to publish the change.', { removal });
+  }
+  async securityChange(makeVault, successMessage, { removal, clearPasswords = false } = {}) {
     if (this.busy || !this.session?.dek) return;
     const generation = this.generation, base = this.vault, session = this.session;
-    this.setBusy(true, '#security-section'); $('#security-status').textContent = 'Updating security…';
+    this.setBusy(true, '#security-controls'); $('#security-status').textContent = '';
     try {
       const changed = await makeVault(base, session);
-      if (generation !== this.generation) return;
+      if (generation !== this.generation || session !== this.session) return;
       const updated = await commitVault(session.payload, base, changed);
-      if (generation !== this.generation) return;
+      if (generation !== this.generation || session !== this.session) return;
       this.vault = updated; this.session.vault = updated;
       await this.persistRemembered();
-      if (generation !== this.generation) return;
-      this.renderSecurity(); $('#security-status').textContent = 'Security updated. GitHub Pages may take a minute to publish the change.';
-    } catch (error) { if (generation === this.generation) $('#security-status').textContent = this.message(error); }
-    finally {
-      if (generation === this.generation) {
-        this.setBusy(false, '#security-section'); clearInputs('#current-password', '#new-password', '#confirm-password');
+      if (generation !== this.generation || session !== this.session) return;
+      this.notify(successMessage);
+    } catch (error) {
+      if (generation === this.generation && session === this.session) this.notify(this.message(error));
+    } finally {
+      if (generation === this.generation && session === this.session) {
+        if (removal) this.pendingRemovals.delete(removal.id);
+        this.setBusy(false, '#security-controls');
+        if (clearPasswords) clearInputs('#current-password', '#new-password', '#confirm-password');
+        this.renderSecurity();
+        // Expired removals wait for an active password/passkey change instead of being dropped.
+        void this.flushRemovals();
       }
     }
   }
   async addPasskey() {
     await this.securityChange(async (base, session) => {
-      const registration = await registerPasskey(message => { $('#security-status').textContent = message; });
+      const registration = await registerPasskey(message => this.notify(message));
       try { return await addPasskeySlot(base, session.dek, { ...registration, label: $('#passkey-label').value.trim() || defaultPasskeyLabel() }); }
       finally { registration.prfOutput.fill(0); }
-    });
+    }, 'Passkey added. GitHub Pages may take a minute to publish the change.');
   }
   async changePassword() {
     await this.securityChange(async base => {
@@ -246,6 +329,6 @@ export class VaultAccess {
       const verified = await unlockWithPassword(base, $('#current-password').value);
       try { return await changePassword(base, verified.dek, password); }
       finally { verified.dek.fill(0); }
-    });
+    }, 'Password changed. GitHub Pages may take a minute to publish the change.', { clearPasswords: true });
   }
 }

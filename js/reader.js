@@ -2,7 +2,7 @@ import { renderMarkdown } from './markdown.js';
 
 const uid = () => crypto.randomUUID();
 const elementTarget = target => target?.nodeType === Node.ELEMENT_NODE ? target : target?.parentElement;
-const isTyping = target => elementTarget(target)?.closest('input, textarea, [contenteditable="true"]');
+const isTyping = target => elementTarget(target)?.closest('input, textarea, [contenteditable]:not([contenteditable="false"]), .interlinear-editor');
 const textNodes = root => {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   const nodes = []; let node;
@@ -46,33 +46,35 @@ function separateImageParagraphs(root) {
 }
 
 export class Reader {
-  constructor({ root, warnings, onChange, onQuote, onOpen, getAsset, notify }) {
-    Object.assign(this, { root, warnings, onChange, onQuote, onOpen, getAsset, notify });
+  constructor({ root, warnings, onChange, onQuote, onDelete, onOpen, getAsset, notify }) {
+    Object.assign(this, { root, warnings, onChange, onQuote, onDelete, onOpen, getAsset, notify });
     this.highlights = []; this.lines = []; this.active = null;
     this.actions = document.querySelector('#selection-actions');
-    this.menu = document.querySelector('#selection-menu');
     this.canvas = document.createElement('canvas');
     this.measure = this.canvas.getContext('2d');
     document.addEventListener('selectionchange', () => this.captureSelection());
-    document.querySelector('#highlight-selection').addEventListener('pointerdown', e => e.preventDefault());
+    this.actions.addEventListener('pointerdown', e => e.preventDefault());
     document.querySelector('#highlight-selection').addEventListener('click', () => this.highlight());
-    this.root.addEventListener('contextmenu', e => this.contextMenu(e));
-    this.menu.addEventListener('pointerdown', e => e.preventDefault());
-    this.menu.addEventListener('click', async e => {
-      const action = elementTarget(e.target)?.closest('[data-action]')?.dataset.action;
-      if (!action) return;
-      if (action === 'highlight') this.highlight();
-      else if (action === 'copy') {
-        try { await navigator.clipboard.writeText(this.selection?.quote || ''); this.notify('Passage copied.'); }
-        catch { this.notify('Clipboard unavailable. Use your browser’s Copy command.'); }
-      } else if (action === 'search' && this.selection) {
-        window.open(`https://www.google.com/search?q=${encodeURIComponent(this.selection.quote)}`, '_blank', 'noopener,noreferrer');
-      }
-      this.menu.hidden = true;
+    document.querySelector('#send-selection').addEventListener('click', () => {
+      if (!this.selection) return;
+      const quote = this.selection.quote;
+      this.closeActions(); this.onQuote(quote);
+    });
+    document.querySelector('#copy-selection').addEventListener('click', async () => {
+      if (!this.selection) return;
+      const quote = this.selection.quote;
+      this.closeActions();
+      try { await navigator.clipboard.writeText(quote); window.getSelection()?.removeAllRanges(); this.notify('Passage copied.'); }
+      catch { this.notify('Clipboard unavailable. Use your browser’s Copy command.'); }
     });
     document.addEventListener('pointerdown', e => {
-      if (!elementTarget(e.target)?.closest('.context-menu, .selection-actions')) this.menu.hidden = true;
+      if (!this.actions.contains(elementTarget(e.target))) this.closeActions();
     });
+    const reposition = () => { if (!this.actions.hidden) this.positionActions(); };
+    document.addEventListener('scroll', reposition, true);
+    window.addEventListener('resize', reposition);
+    window.visualViewport?.addEventListener('resize', reposition);
+    window.visualViewport?.addEventListener('scroll', reposition);
     this.root.addEventListener('click', e => {
       const mark = elementTarget(e.target)?.closest('[data-highlight]');
       if (mark && window.getSelection()?.isCollapsed !== false) {
@@ -92,18 +94,17 @@ export class Reader {
       const item = this.highlights.find(h => h.id === button.dataset.id);
       if (!item) return;
       if (button.dataset.noteAction === 'delete') {
-        item.deleted = true; item.updated_at = new Date().toISOString();
-        this.active = null; this.changed(); this.layout();
+        this.onDelete(structuredClone(item));
       } else if (button.dataset.noteAction === 'quote') this.onQuote(item.quote);
       else this.edit(item.id);
     });
-    let previousWidth = 0;
     this.resize = new ResizeObserver(entries => {
       const width = Math.round(entries[0].contentRect.width);
-      if (width === previousWidth || !this.markdown) return;
-      previousWidth = width;
+      if (width === this.layoutWidth || !this.markdown) return;
       clearTimeout(this.resizeTimer);
-      this.resizeTimer = setTimeout(() => this.layout(), 100);
+      this.resizeTimer = setTimeout(() => {
+        if (Math.round(this.root.getBoundingClientRect().width) !== this.layoutWidth) this.layout();
+      }, 100);
     });
     this.resize.observe(root);
     document.fonts?.ready.then(() => { if (this.markdown) this.layout(); });
@@ -122,13 +123,15 @@ export class Reader {
       return structuredClone(line ? { ...h, start: anchor.start, para: line.para } : h);
     });
   }
-  closeActions() { this.actions.hidden = true; this.menu.hidden = true; }
+  closeActions() { this.actions.hidden = true; this.selection = null; this.selectionRange = null; }
   close() {
     this.active = null; this.closeActions(); this.renderNotes();
     if (isTyping(document.activeElement) && this.root.contains(document.activeElement)) document.activeElement.blur();
   }
   layout() {
     const focused = this.caret();
+    this.layoutWidth = Math.round(this.root.getBoundingClientRect().width);
+    this.closeActions();
     this.root.innerHTML = renderMarkdown(this.markdown || '');
     separateImageParagraphs(this.root);
     this.lines = []; this.paragraphs = []; this.text = '';
@@ -221,7 +224,7 @@ export class Reader {
   }
   endpoint(node, offset) {
     const el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
-    const run = el.closest('.source-run');
+    const run = el?.closest('.source-run');
     if (!run || !this.root.contains(run)) return null;
     const range = document.createRange(); range.selectNodeContents(run);
     try { range.setEnd(node, offset); } catch { return null; }
@@ -229,30 +232,37 @@ export class Reader {
   }
   captureSelection() {
     const selected = window.getSelection();
-    if (!selected?.rangeCount || selected.isCollapsed || isTyping(document.activeElement)) {
-      this.actions.hidden = true; this.selection = null; return;
+    if (document.body.classList.contains('auth-blocked') || !selected?.rangeCount || selected.isCollapsed
+      || isTyping(document.activeElement) || isTyping(selected.anchorNode) || isTyping(selected.focusNode)) {
+      this.closeActions(); return;
     }
     const range = selected.getRangeAt(0);
     const start = this.endpoint(range.startContainer, range.startOffset);
     const end = this.endpoint(range.endContainer, range.endOffset);
-    if (start === null || end === null || end <= start) { this.actions.hidden = true; this.selection = null; return; }
+    if (start === null || end === null || end <= start) { this.closeActions(); return; }
     const quote = this.text.slice(start, end);
-    if (!quote.trim()) return;
+    if (!quote.trim()) { this.closeActions(); return; }
     this.selection = { start, end, quote, para: this.lines.find(l => l.start <= start && l.end > start)?.para || 0,
       prefix: this.text.slice(Math.max(0, start - 48), start), suffix: this.text.slice(end, end + 48) };
-    const rect = range.getBoundingClientRect();
-    this.actions.style.left = `${Math.max(8, Math.min(innerWidth - 160, rect.left))}px`;
-    this.actions.style.top = `${Math.max(55, Math.min(innerHeight - 48, rect.top - 42))}px`;
+    this.selectionRange = range.cloneRange();
     this.actions.hidden = false;
+    this.positionActions();
   }
-  contextMenu(e) {
-    if (e.shiftKey || isTyping(e.target)) return;
-    this.captureSelection();
-    if (!this.selection || window.getSelection()?.isCollapsed) return;
-    e.preventDefault(); this.actions.hidden = true;
-    this.menu.style.left = `${Math.min(e.clientX, innerWidth - 190)}px`;
-    this.menu.style.top = `${Math.min(e.clientY, innerHeight - 150)}px`;
-    this.menu.hidden = false; this.menu.querySelector('button').focus({ preventScroll: true });
+  positionActions() {
+    const range = this.selectionRange;
+    if (!range || !this.root.contains(range.startContainer) || !this.root.contains(range.endContainer)
+      || document.body.classList.contains('auth-blocked')) { this.closeActions(); return; }
+    const viewport = window.visualViewport;
+    const left = viewport?.offsetLeft || 0, top = viewport?.offsetTop || 0;
+    const width = viewport?.width || innerWidth, height = viewport?.height || innerHeight;
+    const inset = 8;
+    this.actions.style.maxWidth = `${Math.max(0, width - inset * 2)}px`;
+    this.actions.style.maxHeight = `${Math.max(0, height - inset * 2)}px`;
+    this.actions.style.overflow = 'auto';
+    const toolbar = this.actions.getBoundingClientRect();
+    const rect = range.getBoundingClientRect();
+    this.actions.style.left = `${Math.max(left + inset, Math.min(left + width - toolbar.width - inset, rect.left))}px`;
+    this.actions.style.top = `${Math.max(top + inset, Math.min(top + height - toolbar.height - inset, rect.top - toolbar.height - inset))}px`;
   }
   highlight() {
     if (!this.selection) return;

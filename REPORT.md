@@ -193,3 +193,73 @@ Live GitHub permissions/Pages publication, native Safari/iOS behavior, and physi
 - **Direct visual checks:** inspected the loaded demo library and setup mismatch screen in Chrome; the token remained masked and both password fields were empty.
 
 All edits remain inside `site/`. No `vault.json` was created; mocked GitHub vault writes remained in memory. No real credentials, commit or push were used. Live GitHub and physical authenticator limits remain unchanged.
+
+## v2 phase 1
+
+### Changed
+
+- Top bar: Library stays left; private sync shows relative age, an exact local-time tooltip and a 15-second refresh. Lock and ⋯ are on the right. ⋯ contains View, Settings and Help; View owns density and theme. At 390 × 844, only Library, the title, Notes and ⋯ remain in the bar.
+- Renamed the pane/help label to Notes. Added reusable dashed `.bot-content` styling to the intake summary and existing bot-pane text, never user notes/highlights. Intake is labelled “Summary · from intake”; supplied `summary_by` is shown without inventing a writer. Existing summary front matter can name `summary_by` / `connections_by`.
+- Preserved `j`/`k`/Enter, `/`, `?`, and reader keys. Global shortcuts ignore inputs, textareas, editable contenteditable variants, textbox editors and blocked auth screens. Esc closes menus/overlays/drawers before closing the reader. The interlinear editor retains its local editing keys.
+- Removed the custom context menu. Selection offers Highlight, Send to notes and Copy; selectionchange and visualViewport-aware positioning support touch selections and viewport changes. Native right-click is not prevented.
+- One six-second toast system replaces transient notices. Highlight deletion and automatic read/commented transitions apply immediately and can be undone. Highlight Undo works after navigating away and after synchronization. Passkey removal hides the slot immediately but delays publication until its own Undo window expires; Lock cancels pending removals. Concurrent notices retain independent timers.
+- Lock screen: Password, Unlock, available passkey option, Remember this device, Explore the demo and collapsed Other options. Setup never overwrites a vault. Separate `#replace` requires exact, untrimmed REPLACE before publication.
+- Settings order: Security, Backup, Connection, then collapsed Advanced token connection. Direct `#demo` skips credentials/vault loading; demo article hashes retain the demo marker so reload stays local in `demo:v1`.
+- Updated public shell cache version, README and DESIGN. Added the no-dialogs regression and extended the existing fictional browser harness. A small Node test entry point ensures `node --test tests/` runs both test files instead of only the old package entry.
+
+Current unread/read/commented statuses, their existing automatic rules and persisted state/notes formats remain in place. No migrations, Arrivals, queue, shelves, Edition, Listen or end-of-article bot box were built. `vault.json` was not created or edited. No commit, push or deployment was performed.
+
+### Verification actually run
+
+All commands below ran from `site/`.
+
+```sh
+node --check sw.js && node --check js/app.js && node --check js/auth.js && node --check js/demo.js && node --check js/library.js && node --check js/markdown.js && node --check js/notes.js && node --check js/passkey.js && node --check js/reader.js && node --check js/session.js && node --check js/store.js && node --check js/vault-api.js && node --check js/vault.js && node --check tests/index.mjs && node --check tests/no-dialogs.test.mjs && node --check tests/vault.test.mjs && node --test tests/
+```
+
+Passed syntax checks for **13 application JS files and 3 test modules**. Node reported **20 tests, 20 passed, 0 failed, 0 skipped**, including the unchanged vault suite and the recursive native-dialog scan.
+
+- Focused runs of the actual Playwright scenarios passed selection-toolbar Copy/Send/Highlight, deletion/Undo across navigation and reload, automatic status Undo, editor guards, relative sync timer, demo/mobile behavior, setup/unlock/remember/Lock, exact replacement gating, delayed passkey deletion/conflicts/cancellation, and CDP virtual-authenticator PRF add/unlock.
+- Earlier full runs exposed a Text-node target exception in the new outside-click handler and a smoke click aimed behind the mobile menu. The handler now normalizes the target; the outside-click scenario uses an uncovered point. Re-selecting a successfully copied passage now starts cleanly. A direct browser reload exposed loss of demo routing; retaining the demo article marker fixes it.
+- Direct Chrome visual inspection covered the dark desktop at 1440 × 900, light phone at 390 × 844, overflow/View controls, mobile Settings order and collapsed Advanced. Reloading a demo article retained `#demo&article=…` and opened fictional content.
+- The added touch-emulation regression exposed an unnecessary first ResizeObserver reflow that cleared a new selection despite unchanged width. The reader now tracks its last measured layout width and skips that redundant reflow; selecting then tapping Highlight survives and persists the exact quote.
+
+The local server used for the final suite was:
+
+```sh
+python3 -m http.server 8766 --bind 127.0.0.1
+```
+
+Final verification command:
+
+```sh
+node --check js/reader.js && node --test tests/ && python3 tests/smoke.py http://localhost:8766
+```
+
+**Passed**, combined wall time **137.18 seconds**. The final reader syntax check passed; Node again reported **20/20**; all **17 top-level browser scenarios** passed with system Chrome `/usr/bin/google-chrome`, fictional data and intercepted GitHub/vault endpoints:
+
+```text
+PASS navigation_media_layout
+PASS indexed_search
+PASS debounce_status_and_growth
+PASS highlight_drag_and_persistence
+PASS keyboard_stars_and_read
+PASS phase_one_surface
+PASS selection_toolbar_and_undo
+PASS automatic_status_undo_and_typing
+PASS relative_sync_timer
+PASS mobile_and_demo
+PASS store_conflict_export_import
+PASS setup_unlock_remember_lock
+PASS setup_replacement_and_invalidation
+PASS security_password_remove_conflicts
+PASS lock_during_search
+PASS replacement_during_security_work
+PASS CDP virtual authenticator PRF add and unlock (not physical hardware)
+PASS cdp_passkey_unlock
+PASS all fictional headless reading-terminal regressions
+```
+
+The suite additionally passed all four full/absent/malformed/partial search-index cases. No uncaught browser exceptions or unexpected network requests were reported. Coverage includes mouse and emulated-touch toolbar use, six-second deletion/Undo expiry and persistence, contenteditable/input/lock shortcut guards, reader Esc, mobile top bar, sync-age refresh without writes, replacement rejection for non-exact REPLACE, independent passkey Undo windows, conflict retries and cancellation on Lock. The original navigation/media, notes/drag/persistence, store merge/backup and vault scenarios remain passing. Verification services were stopped afterward.
+
+Native iPhone/iPad Safari, physical Face ID/Touch ID and live GitHub/Pages publication were not available for verification. Chrome touch emulation and a virtual authenticator do not establish native Safari or physical-device support. No real credentials or private reading data were used in the tests.
