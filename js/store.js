@@ -1,5 +1,6 @@
-import { demoLibrary, demoArticles, demoNotes, demoSummaries, demoState, demoMeta, demoQueue } from './demo.js';
+import { demoLibrary, demoArticles, demoNotes, demoSummaries, demoState, demoMeta, demoQueue, demoEdition } from './demo.js';
 import { migrateState, libraryFields } from './model.js';
+import { localDate, parseEdition } from './edition.js';
 
 const SETTINGS_KEY = 'reading-terminal.settings';
 const DATABASE = 'reading-terminal-cache';
@@ -93,6 +94,8 @@ function normalizeNotes(input) {
       note: String(entry.note || ''), created_at: newest(entry.created_at || updated), updated_at: updated,
     };
     if (Number.isInteger(entry.start) && entry.start >= 0) value.start = entry.start;
+    if (typeof entry.still_agree_at === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(entry.still_agree_at) &&
+        Number.isFinite(Date.parse(entry.still_agree_at))) value.still_agree_at = entry.still_agree_at;
     const previous = highlights.get(value.id);
     if (!previous || stamp(updated) > stamp(previous.updated_at) ||
         (stamp(updated) === stamp(previous.updated_at) && JSON.stringify(value) > JSON.stringify(previous))) highlights.set(value.id, value);
@@ -124,6 +127,30 @@ function mergeHiddenLinks(a, b, base) {
   const ancestor = new Set(base);
   return [...new Set([...a, ...b])].filter(slug => ancestor.has(slug)
     ? left.has(slug) && right.has(slug) : left.has(slug) || right.has(slug)).sort();
+}
+
+function mergeKeptLinks(a, b, base) {
+  const membership = new Set(mergeHiddenLinks(a.map(link => link.slug), b.map(link => link.slug), base.map(link => link.slug)));
+  return mergeLinks(a, b).filter(link => membership.has(link.slug));
+}
+
+function mergeHighlight(left, right, before, winner) {
+  if (!left || !right) return clone(winner);
+  const content = highlight => {
+    const { still_agree_at, updated_at, ...fields } = highlight || {};
+    return fields;
+  };
+  // An agreement-only edit must not replace an independently edited quote or note.
+  const selected = equal(content(left), content(before)) ? right
+    : equal(content(right), content(before)) ? left : winner;
+  const result = { ...selected, updated_at: newest(left.updated_at, right.updated_at) };
+  const agreement = left.still_agree_at === right.still_agree_at ? left.still_agree_at
+    : left.still_agree_at === before?.still_agree_at ? right.still_agree_at
+      : right.still_agree_at === before?.still_agree_at ? left.still_agree_at
+        : winner.still_agree_at;
+  if (agreement === undefined) delete result.still_agree_at;
+  else result.still_agree_at = agreement;
+  return result;
 }
 
 function longNoteMerge(local, remote, base) {
@@ -159,7 +186,7 @@ export function mergeNotes(local, remote, base = null) {
   const result = {
     long_notes: text.text, highlights: [], updated_at: newest(a.updated_at, b.updated_at),
     long_notes_updated_at: text.time, deleted_highlights: {},
-    links: mergeLinks(a.links, b.links), hidden_links: mergeHiddenLinks(a.hidden_links, b.hidden_links, ancestor.hidden_links),
+    links: mergeKeptLinks(a.links, b.links, ancestor.links), hidden_links: mergeHiddenLinks(a.hidden_links, b.hidden_links, ancestor.hidden_links),
   };
   for (const id of [...ids].sort()) {
     const left = am.get(id);
@@ -181,7 +208,7 @@ export function mergeNotes(local, remote, base = null) {
     const winner = candidates[0];
     if (!winner) continue;
     if (winner.deleted) result.deleted_highlights[id] = winner.time;
-    else result.highlights.push(clone(winner.value));
+    else result.highlights.push(mergeHighlight(left, right, old.get(id), winner.value));
   }
   result.highlights.sort((x, y) => x.para - y.para || stamp(x.created_at) - stamp(y.created_at) || x.id.localeCompare(y.id));
   return result;
@@ -487,6 +514,8 @@ export class ReadingStore extends EventTarget {
       for (const [slug, text] of Object.entries(demoArticles)) seeds[`articles/${slug}.md`] = text;
       for (const [slug, notes] of Object.entries(demoNotes)) seeds[`user/notes/${slug}.json`] = notes;
       for (const [slug, text] of Object.entries(demoSummaries)) seeds[`bot/summaries/${slug}.md`] = text;
+      const edition = demoEdition();
+      seeds[`bot/editions/${edition.date}.json`] = edition;
       for (const [path, content] of Object.entries(seeds)) if (!path.startsWith('user/') || !this._cache.has(path)) {
         this._putCache(path, normalizeContent(path, clone(content)), null, JSON.stringify(content));
       }
@@ -715,7 +744,9 @@ export class ReadingStore extends EventTarget {
     if (data.encoding === 'base64' && typeof data.content === 'string') text = base64Text(data.content);
     else text = await this._request(this._contentUrl(path), { headers: { Accept: 'application/vnd.github.raw+json' } }, 'text');
     let content = text;
-    if (path.endsWith('.json')) {
+    if (/^bot\/editions\/\d{4}-\d{2}-\d{2}\.json$/.test(path)) {
+      content = parseEdition(text, this._cache.get('library.json')?.content || [], path.slice('bot/editions/'.length, -5));
+    } else if (path.endsWith('.json')) {
       try { content = JSON.parse(text); } catch { throw new Error(`${path} is not valid JSON. No remote data was overwritten.`); }
       content = normalizeContent(path, content);
     }
@@ -793,6 +824,24 @@ export class ReadingStore extends EventTarget {
   getArticle(slug) { return this._get(`articles/${safeSlug(slug)}.md`); }
   getNotes(slug) { return this._get(`user/notes/${safeSlug(slug)}.json`, emptyNotes()); }
   getSummary(slug) { return this._get(`bot/summaries/${safeSlug(slug)}.md`, ''); }
+  async getEdition(date = localDate(), { refresh = false } = {}) {
+    this._assertOpen();
+    await this._ensureReady();
+    this._assertOpen();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+    const path = `bot/editions/${date}.json`;
+    if (this.demo && date === localDate() && !this._cache.has(path)) {
+      this._putCache(path, demoEdition(), null);
+      await this._persist(path);
+    }
+    if (!this.demo && (refresh || !this._cache.has(path))) {
+      try { await this._refresh(path, null); }
+      catch (error) { this._error(error); /* Keep the cached edition when offline. */ }
+    }
+    this._assertOpen();
+    const content = this._cache.get(path)?.content;
+    return content == null ? null : parseEdition(content, this._cache.get('library.json')?.content || [], date);
+  }
   getSearchIndex() {
     this._assertOpen();
     return this._searchIndexPromise ||= (async () => {
@@ -875,7 +924,6 @@ export class ReadingStore extends EventTarget {
     const path = `user/notes/${safeSlug(slug)}.json`;
     const previous = normalizeNotes(this._cache.get(path)?.content);
     const incoming = normalizeNotes({ ...previous, ...notes });
-    incoming.links = mergeLinks(previous.links, incoming.links);
     const time = this._now();
     incoming.deleted_highlights = { ...previous.deleted_highlights, ...incoming.deleted_highlights };
     const old = new Map(previous.highlights.map(highlight => [highlight.id, highlight]));

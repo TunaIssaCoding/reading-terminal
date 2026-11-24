@@ -160,15 +160,20 @@ function markdownContent(markdown) {
 }
 
 export class BotBox {
-  constructor({ root, onKeep, onHide, onOpen }) {
+  constructor({ root, getItem, onKeep, onUnkeep, onHide, onOpen }) {
     this.root = root;
+    this.getItem = getItem;
+    this.onUnkeep = onUnkeep;
+    this.markdown = null;
+    this.showHidden = false;
     this.onKeep = onKeep;
     this.onHide = onHide;
     this.onOpen = onOpen;
     root.classList.add('bot-content');
     root.hidden = true;
     root.addEventListener('click', event => {
-      const link = event.target.closest('a[data-article]');
+      const target = event.target.nodeType === Node.ELEMENT_NODE ? event.target : event.target.parentElement;
+      const link = target?.closest('a[data-article]');
       if (!link || !root.contains(link)) return;
       event.preventDefault();
       this.onOpen?.(link.dataset.article);
@@ -176,6 +181,8 @@ export class BotBox {
   }
 
   render(markdown, notes = {}) {
+    if (markdown !== this.markdown) this.showHidden = false;
+    this.markdown = markdown;
     this.root.replaceChildren();
     this.root.hidden = !String(markdown ?? '').trim();
     if (this.root.hidden) return;
@@ -189,30 +196,60 @@ export class BotBox {
     }
     const hidden = new Set(notes?.hidden_links || []);
     const kept = new Set((notes?.links || []).map(link => link.slug));
-    const suggestions = summary.connections.filter(connection => !hidden.has(connection.slug));
-    if (!suggestions.length) return;
+    const hiddenCount = summary.connections.filter(connection => hidden.has(connection.slug)).length;
+    const suggestions = summary.connections.filter(connection => this.showHidden || !hidden.has(connection.slug));
+    if (!summary.connections.length) return;
     this.root.append(element('h2', 'bot-connections-heading', `Suggested by ${summary.connections_by}`));
+    if (hiddenCount) {
+      const toggle = element('button', 'bot-show-hidden', `${this.showHidden ? 'Hide hidden' : 'Show hidden'} (${hiddenCount})`);
+      toggle.type = 'button';
+      toggle.setAttribute('aria-expanded', String(this.showHidden));
+      toggle.addEventListener('click', () => {
+        this.showHidden = !this.showHidden;
+        this.render(markdown, notes);
+        this.root.querySelector('.bot-show-hidden')?.focus();
+      });
+      this.root.append(toggle);
+    }
     const list = element('ul', 'bot-connections');
     for (const connection of suggestions) {
       const row = element('li', 'bot-connection');
       row.dataset.slug = connection.slug;
-      const link = element('a', 'bot-connection-link', connection.title);
-      link.href = `#article=${encodeURIComponent(connection.slug)}`;
-      link.dataset.article = connection.slug;
+      const item = this.getItem?.(connection.slug);
+      const title = item?.title || connection.title || connection.slug;
+      const link = element(item ? 'a' : 'span', 'bot-connection-link', title);
+      if (item) {
+        link.href = `#article=${encodeURIComponent(connection.slug)}`;
+        link.dataset.article = connection.slug;
+      }
       row.append(link);
+      if (!item) row.append(element('span', 'connection-missing', 'not in your library'));
+      if (hidden.has(connection.slug)) row.append(element('span', 'connection-hidden', 'Hidden'));
       if (connection.why) row.append(markdownContent(connection.why));
-      const keep = element('button', 'bot-keep', kept.has(connection.slug) ? 'Kept' : 'Keep link');
+      const keep = element('button', 'bot-keep', kept.has(connection.slug) ? 'Kept ✓' : 'Keep link');
       keep.type = 'button';
       keep.dataset.action = 'keep';
       keep.dataset.slug = connection.slug;
-      keep.disabled = kept.has(connection.slug);
-      keep.addEventListener('click', () => this.onKeep?.({ slug: connection.slug, title: connection.title }));
+      keep.disabled = !item || kept.has(connection.slug);
+      keep.addEventListener('click', () => {
+        const current = this.getItem?.(connection.slug);
+        if (current) this.onKeep?.({ slug: connection.slug, title: current.title || connection.slug });
+      });
+      row.append(keep);
+      if (kept.has(connection.slug)) {
+        const unkeep = element('button', 'bot-unkeep', 'Unkeep');
+        unkeep.type = 'button';
+        unkeep.dataset.slug = connection.slug;
+        unkeep.addEventListener('click', () => this.onUnkeep?.(connection.slug));
+        row.append(unkeep);
+      }
       const hide = element('button', 'bot-hide', 'Hide');
       hide.type = 'button';
       hide.dataset.action = 'hide';
       hide.dataset.slug = connection.slug;
+      hide.disabled = hidden.has(connection.slug);
       hide.addEventListener('click', () => this.onHide?.(connection.slug));
-      row.append(keep, hide);
+      row.append(hide);
       list.append(row);
     }
     this.root.append(list);

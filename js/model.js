@@ -88,9 +88,8 @@ export function splitArrivals(items, state = {}, arrivals_since) {
   return { arrivals, pile };
 }
 
-export function defaultView(queueIds, arrivals) {
-  // Phase 4 can insert the Edition default here.
-  return queueIds.length ? 'queue' : arrivals.length ? 'arrivals' : 'library';
+export function defaultView(queueIds, arrivals, edition = null) {
+  return edition ? 'edition' : queueIds.length ? 'queue' : arrivals.length ? 'arrivals' : 'library';
 }
 
 export function pileThisWeek(items, state, arrivals_since, date = new Date()) {

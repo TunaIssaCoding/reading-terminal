@@ -1,3 +1,5 @@
+import { localDate } from './edition.js';
+
 // Entirely fictional material for the self-contained, offline demo.
 const dates = ['2026-06-18T09:00:00.000Z', '2026-06-14T13:00:00.000Z', '2026-06-10T10:30:00.000Z'];
 
@@ -226,7 +228,7 @@ for (let index = 1; index <= 3; index++) {
     id, slug: id, title: `A small observatory, notebook ${index}`,
     author: 'Tavi Moss · fictional', source_type: 'essay', source_label: 'Cloudbank Journal',
     created_at: '2026-06-25T09:00:00.000Z', added_at: '2026-06-25T09:00:00.000Z',
-    words: 920, read_minutes: 4, tags: ['Observation'],
+    words: index === 1 ? 3220 : 920, read_minutes: index === 1 ? 14 : 4, tags: ['Observation'],
     summary: 'A fictional village observatory keeps patient records of changing clouds.', images: [],
   });
   demoArticles[id] = `## Notebook ${index}\n\nAt the fictional Cloudbank observatory, Tavi records the weather before offering an explanation.\n\nA useful observation leaves room for tomorrow to disagree. The group compares notes slowly, preserving the question beside each measurement.\n\nThe notebooks belong to an invented community. No private reading material is included in this example.`;
@@ -283,3 +285,18 @@ export const demoQueue = {
   arrivals_since: '2026-06-01T00:00:00.000Z',
 };
 export const demoMeta = { updated_at: '2026-06-24T09:00:00.000Z' };
+
+/** Hand-made, fictional selection; only its publication date follows demo startup. */
+export function demoEdition(date = new Date()) {
+  return {
+    date: localDate(date), generated_at: date.toISOString(), bot: 'Bellweather reading bot',
+    picks: [
+      { slot: 'long', slug: 'demo-queued-01', why: 'A 14-minute notebook from your Observation shelf, already waiting in Up next.' },
+      { slot: 'short', slug: 'demo-queued-02', why: 'Four minutes on Observation: compare the question beside each measurement.' },
+      { slot: 'archive', slug: 'a-library-that-remembers-why', why: 'Saved in June: revisit the library’s questions alongside your keeper on margins.' },
+    ],
+    margin: { slug: 'the-space-between-observations', highlight_id: 'demo-highlight-question',
+      why: 'You noted this in June: proximity preserves the reason for a question.' },
+    arrivals: ['demo-arrival-04', 'demo-arrival-03', 'demo-arrival-02'],
+  };
+}

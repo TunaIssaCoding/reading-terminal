@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Headless behavioral regressions; all GitHub data below is fictional.
 
-Serve site/, then run: python3 site/tests/smoke.py [http://localhost:8765]
+Serve site/, then run: python3 site/tests/smoke.py [http://localhost:8808]
 READING_BASE_URL supplies the URL when the positional argument is omitted.
 Requires Python Playwright and /usr/bin/google-chrome; no browser install needed.
 No real repository, credentials, downloads, screenshots, or result files are used.
@@ -211,10 +211,11 @@ class Repository:
 
 @contextmanager
 def session(browser, base, repo=None, mobile=False, store_only=False, demo=False, vault=False, clock=False,
-            open_reader=True, preserve_mode=False):
+            open_reader=True, preserve_mode=False, timezone_id="UTC"):
     repo = repo or Repository()
     context = browser.new_context(viewport={"width": 390 if mobile else 1440, "height": 844 if mobile else 900},
-                                  service_workers="block", reduced_motion="reduce", has_touch=mobile)
+                                  service_workers="block", reduced_motion="reduce", has_touch=mobile,
+                                  timezone_id=timezone_id)
     errors, unexpected = [], []
     origin = urlparse(base)
 
@@ -259,27 +260,19 @@ def session(browser, base, repo=None, mobile=False, store_only=False, demo=False
     page.goto(base + ("/__smoke_store__.html" if store_only else "/#demo" if demo else "/"))
     if not store_only and not vault:
         page.wait_for_selector("body[data-mode]", state="attached")
-        if demo:
-            expect(page.locator("body")).to_have_attribute("data-mode", "queue")
-            expect(page.locator(".queue-row").first).to_have_attribute("data-id", "demo-queued-01")
-            expect(page.locator("#article-header h1")).to_have_text("A small observatory, notebook 1")
+        mode = page.locator("body").get_attribute("data-mode")
+        if mode in ("edition", "queue"):
+            page.wait_for_selector(".source-line")
             expect(page.locator(NOTES)).to_be_enabled()
+            if preserve_mode:
+                select_mode(page, mode)
         else:
-            queue = repo.document("user/queue.json").get("queue", []) if "user/queue.json" in repo.files else []
-            if queue:
-                expect(page.locator("body")).to_have_attribute("data-mode", "queue")
             expect(page.locator(".source-line")).to_have_count(0)
             expect(page.locator(NOTES)).to_be_disabled()
-            assert "#article=" not in page.url, "A real default load opened an article"
+        assert "article=" not in page.url, "A default preview changed the article route"
         if not preserve_mode:
             select_mode(page, "library")
             expect(page.locator(".library-item").first).to_be_attached()
-            if demo:
-                page.locator("#reader-pane").focus()
-                page.keyboard.press("Escape")
-                expect(page.locator(".source-line")).to_have_count(0)
-                if mobile:
-                    select_mode(page, "library")
             if open_reader:
                 slug = "demo-library" if demo else "essay-01"
                 page.locator(f'[data-library-id="{slug}"] .library-title').click()
@@ -296,7 +289,8 @@ def session(browser, base, repo=None, mobile=False, store_only=False, demo=False
 
 
 def select_mode(page, mode):
-    target = "#library-scroll" if mode == "library" else "#mode-content"
+    page.wait_for_selector("body[data-mode]", state="attached")
+    target = "#library-scroll" if mode == "library" else "#edition-content" if mode == "edition" else "#mode-content"
     drawer_visible = page.viewport_size["width"] > 860 or page.locator("body.library-open").count()
     if (page.locator("body").get_attribute("data-mode") == mode
             and drawer_visible and page.locator(target).first.is_visible()):
@@ -305,7 +299,8 @@ def select_mode(page, mode):
     if mobile.count():
         mobile.first.click()
     else:
-        page.locator({"library": "#library-toggle", "arrivals": "#arrivals-mode", "queue": "#queue-mode"}[mode]).click()
+        page.locator({"library": "#library-toggle", "arrivals": "#arrivals-mode",
+                      "queue": "#queue-mode", "edition": "#edition-mode"}[mode]).click()
     expect(page.locator("body")).to_have_attribute("data-mode", mode)
 
 
@@ -753,21 +748,16 @@ def mobile_and_demo(browser, base):
         assert TOKEN not in page.evaluate("JSON.stringify({...localStorage})")
         page.goto(base + "/#demo")
         page.reload()
-        expect(page.locator("body")).to_have_attribute("data-mode", "queue")
-        expect(page.locator(".queue-row").first).to_have_attribute("data-id", "demo-queued-01")
         expect(page.locator("#setup-screen")).not_to_be_visible()
+        page.wait_for_selector(".edition-view")
         expect(page.locator("#lock-screen")).not_to_be_visible()
         expect(page.locator("#lock-button")).not_to_be_visible()
-        expect(page.locator(NOTES)).to_be_enabled()
-        expect(page.locator("#article-header h1")).to_have_text("A small observatory, notebook 1")
         assert not repo.requests, "Direct demo link contacted GitHub"
         assert not repo.public_vault_requests, "Reloading demo fetched vault.json"
     with session(browser, base, vault=True) as (page, repo, _):
         expect(page.locator("#setup-screen")).to_be_visible()
         page.locator("#setup-screen [data-demo]").click()
-        expect(page.locator("body")).to_have_attribute("data-mode", "queue")
-        expect(page.locator(NOTES)).to_be_enabled()
-        expect(page.locator("#article-header h1")).to_have_text("A small observatory, notebook 1")
+        page.wait_for_selector(".edition-view")
         assert not repo.requests, "Setup demo link contacted GitHub"
 
 
@@ -1597,10 +1587,7 @@ def returning_demo_namespace(browser, base):
           return {keys, retained, real};
         }""")
         page.goto(base + "/#demo")
-        expect(page.locator("body")).to_have_attribute("data-mode", "queue")
-        expect(page.locator(".queue-row").first).to_have_attribute("data-id", "demo-queued-01")
-        expect(page.locator("#article-header h1")).to_have_text("A small observatory, notebook 1")
-        expect(page.locator(NOTES)).to_be_enabled()
+        page.wait_for_selector(".edition-view")
         result = page.evaluate("""async () => {
           const db = await new Promise((resolve, reject) => {
             const r = indexedDB.open('reading-terminal-cache', 2);
@@ -1654,8 +1641,6 @@ def demo_state_migration(browser, base):
                                    "arrivals_since": "2026-06-01T00:00:00.000Z"}
         assert not repo.requests
         page.reload()
-        expect(page.locator("body")).to_have_attribute("data-mode", "queue")
-        expect(page.locator("#article-header h1")).to_have_text("A small observatory, notebook 1")
         select_mode(page, "library")
         expect(page.locator(".library-item")).to_have_count(42)
         page.locator('[data-library-id="demo-map"] .library-title').click()
@@ -1693,17 +1678,17 @@ def reader_progress_and_bot(browser, base):
         page.locator(NOTES).fill("A newer fictional observation for the bot to revisit.")
         expect(bot.locator(".bot-stale")).to_be_visible()
         bot.locator('[data-action="keep"][data-slug="essay-03"]').click()
-        expect(bot.locator('[data-action="keep"][data-slug="essay-03"]')).to_be_disabled()
+        expect(bot.locator('.bot-connection[data-slug="essay-03"] .bot-unkeep')).to_be_visible()
         bot.locator('[data-action="hide"][data-slug="essay-04"]').click()
         expect(bot.locator('.bot-connection[data-slug="essay-04"]')).to_have_count(0)
         synced(page)
         saved = repo.document("user/notes/essay-01.json")
-        assert saved["links"] == [{"slug": "essay-03", "title": "Third notebook"}], saved
+        assert [link["slug"] for link in saved["links"]] == ["essay-03"], saved
         assert saved["hidden_links"] == ["essay-04"], saved
         assert saved["long_notes"] == "A newer fictional observation for the bot to revisit."
         page.reload()
         opened(page, "essay-01")
-        expect(page.locator('#bot-box [data-action="keep"][data-slug="essay-03"]')).to_be_disabled()
+        expect(page.locator('#bot-box .bot-connection[data-slug="essay-03"] .bot-unkeep')).to_be_attached()
         expect(page.locator('#bot-box .bot-connection[data-slug="essay-04"]')).to_have_count(0)
         expect(page.locator('#notes-pane a[data-article="essay-03"]')).to_have_count(1)
         page.locator('#notes-pane a[data-article="essay-03"]').click()
@@ -1782,9 +1767,6 @@ def queued_repository(ids=("essay-03", "essay-04", "essay-05")):
 
 def reading_defaults_and_empty_header(browser, base):
     with session(browser, base, demo=True, preserve_mode=True) as (page, repo, _):
-        expect(page.locator("body")).to_have_attribute("data-mode", "queue")
-        expect(page.locator(".queue-row").first).to_have_attribute("data-id", "demo-queued-01")
-        expect(page.locator("#article-header h1")).to_have_text("A small observatory, notebook 1")
         select_mode(page, "arrivals")
         expect(page.locator(".triage-card")).to_have_count(1)
         seen = set()
@@ -2006,7 +1988,6 @@ def shelves_and_pile_batch(browser, base):
         started.locator("summary").click()
         page.goto(base + "/#demo")
         page.reload()
-        expect(page.locator("body")).to_have_attribute("data-mode", "queue")
         select_mode(page, "library")
         assert started.evaluate("el => el.open") == default_open
 
@@ -2030,9 +2011,366 @@ def mobile_modes_and_touch_queue(browser, base):
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
 
 
+def edition_repository(day=None):
+    day = day or datetime.now(timezone.utc).date().isoformat()
+    repo = Repository()
+    for item, minutes in zip(repo.items, (14, 4, 7)):
+        item["read_minutes"] = minutes
+    repo.set("library.json", repo.items)
+    edition = {
+        "date": day, "generated_at": day + "T08:24:00Z", "bot": "Fictional edition bot",
+        "picks": [
+            {"slot": "archive", "slug": "essay-03", "why": "Revisit the fictional January fieldwork."},
+            {"slot": "long", "slug": "essay-01", "why": "Continue the fictional orchard notebook."},
+            {"slot": "short", "slug": "essay-02", "why": "A four-minute fictional observation."}],
+        "margin": {"slug": "essay-05", "highlight_id": "fictional-margin",
+                   "why": "A fictional question from January."},
+        "arrivals": ["essay-06", "essay-07"]}
+    repo.set(f"bot/editions/{day}.json", edition)
+    repo.set("user/notes/essay-05.json", {
+        "long_notes": "An existing fictional reflection.", "long_notes_updated_at": STAMP,
+        "updated_at": STAMP, "links": [], "hidden_links": [], "deleted_highlights": {},
+        "highlights": [{"id": "fictional-margin",
+                        "quote": "The fictional astronomer carried a notebook across the quiet orchard.",
+                        "prefix": "", "suffix": " Every imagined observation", "para": 0,
+                        "note": "Does this fictional observation still hold?",
+                        "created_at": STAMP, "updated_at": STAMP}]})
+    return repo, edition
+
+
+def edition_open(page, slug):
+    select_mode(page, "edition")
+    button = page.locator(f'.edition-pick[data-slug="{slug}"] .edition-open')
+    title = button.inner_text()
+    button.click()
+    expect(page.locator(NOTES)).to_have_attribute("aria-label", "Long notes for " + title)
+    page.wait_for_selector(".source-line")
+    expect(page.locator("body")).to_have_attribute("data-mode", "edition")
+    assert "article=" + slug in page.url, page.url
+
+
+def cached_demo_file(page, path):
+    return page.evaluate("""async path => {
+      const db = await new Promise((resolve, reject) => {
+        const request = indexedDB.open('reading-terminal-cache');
+        request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+      });
+      const records = await new Promise((resolve, reject) => {
+        const request = db.transaction('cache').objectStore('cache').getAll();
+        request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+      });
+      db.close();
+      return records.find(record => record.namespace === 'demo:v2' && record.path === path)?.content;
+    }""", path)
+
+
+def edition_demo_and_returning(browser, base):
+    for mobile in (False, True):
+        with session(browser, base, demo=True, mobile=mobile, preserve_mode=True) as (page, repo, _):
+            expect(page.locator("body")).to_have_attribute("data-mode", "edition")
+            expect(page.locator('button[data-mode="edition"]:visible')).to_have_count(1)
+            expect(page.locator(".edition-masthead")).to_be_visible()
+            expect(page.locator(".edition-pick")).to_have_count(3)
+            expect(page.locator(".edition-margin")).to_be_visible()
+            expect(page.locator(".edition-arrival")).to_have_count(3)
+            picks = page.locator(".edition-pick").evaluate_all("rows => rows.map(row => row.dataset.slug)")
+            titles = page.locator(".edition-open").all_text_contents()
+            expect(page.locator("#article-header h1")).to_have_text(titles[0])
+            expect(page.locator("#progress-chip")).to_have_text("New")
+            expect(page.locator(".edition-progress").first).to_have_text("New")
+            initial_state = cached_demo_file(page, "user/state.json") or {}
+            assert initial_state.get(picks[0], {}).get("progress", "new") == "new"
+            page.locator(".edition-open").first.focus()
+            page.keyboard.press("j")
+            page.keyboard.press("Enter")
+            expect(page.locator(NOTES)).to_have_attribute("aria-label", "Long notes for " + titles[1])
+            page.wait_for_selector(".source-line")
+            assert "article=" + picks[1] in page.url, page.url
+            expect(page.locator("body")).to_have_attribute("data-mode", "edition")
+            select_mode(page, "edition")
+            page.locator(".edition-open").nth(1).focus()
+            page.keyboard.press("k")
+            page.keyboard.press("Enter")
+            expect(page.locator(NOTES)).to_have_attribute("aria-label", "Long notes for " + titles[0])
+            page.wait_for_selector(".source-line")
+            assert "article=" + picks[0] in page.url, page.url
+            if mobile:
+                page.locator("#notes-toggle").click()
+            page.locator(NOTES).fill("A returning fictional demo reader keeps this note.")
+            wait_until(page, lambda: (cached_demo_file(page, "user/notes/" + picks[0] + ".json") or {})
+                       .get("long_notes") == "A returning fictional demo reader keeps this note.",
+                       "Demo note did not reach the v2 cache")
+            page.goto(base + "/#demo")
+            page.reload()
+            expect(page.locator("body")).to_have_attribute("data-mode", "edition")
+            edition_open(page, picks[0])
+            if mobile:
+                page.locator("#notes-toggle").click()
+            expect(page.locator(NOTES)).to_have_value("A returning fictional demo reader keeps this note.")
+            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+            assert not repo.requests and not repo.public_vault_requests
+
+
+def edition_margin_actions(browser, base):
+    repo, edition = edition_repository()
+    path = "user/notes/essay-05.json"
+    original = repo.document(path)
+    quote = original["highlights"][0]["quote"]
+    with session(browser, base, repo, preserve_mode=True) as (page, repo, _):
+        expect(page.locator(".edition-margin")).to_contain_text(quote)
+        expect(page.locator(".edition-margin")).to_contain_text(original["highlights"][0]["note"])
+        page.locator(".edition-agree").click()
+        wait_until(page, lambda: repo.document(path)["highlights"][0].get("still_agree_at") == edition["date"],
+                   "Still agree did not persist the local date")
+        agreed = repo.document(path)["highlights"][0]
+        assert all(agreed[key] == value for key, value in original["highlights"][0].items()
+                   if key != "updated_at"), agreed
+        undo_last(page)
+        wait_until(page, lambda: not repo.document(path)["highlights"][0].get("still_agree_at"),
+                   "Still agree Undo did not persist")
+        page.locator(".edition-agree").click()
+        wait_until(page, lambda: repo.document(path)["highlights"][0].get("still_agree_at") == edition["date"],
+                   "Second agreement did not persist")
+        page.reload()
+        expect(page.locator(".edition-margin")).to_contain_text(quote)
+        assert repo.document(path)["highlights"][0]["still_agree_at"] == edition["date"]
+        baseline, writes = repo.files[path], len([p for p, _, _ in repo.puts if p == path])
+        page.locator(".edition-revise").click()
+        editor = page.locator(NOTES)
+        expect(editor).to_be_focused()
+        expected = original["long_notes"] + "\n\n> " + quote
+        assert editor.input_value().rstrip() == expected
+        assert editor.evaluate("el => el.selectionStart === el.value.length && el.selectionEnd === el.value.length")
+        page.wait_for_timeout(2300)
+        assert repo.files[path] == baseline, "An untouched revision draft saved before input"
+        assert editor.input_value().rstrip() == expected
+        page.keyboard.press("Escape")
+        expect(editor).to_have_value(original["long_notes"])
+        page.wait_for_timeout(2300)
+        assert repo.files[path] == baseline
+        assert len([p for p, _, _ in repo.puts if p == path]) == writes, "Canceling a draft wrote notes"
+        select_mode(page, "edition")
+        page.locator(".edition-revise").click()
+        expect(editor).to_be_focused()
+        editor.press("End")
+        editor.press("Enter")
+        editor.press("Enter")
+        editor.press_sequentially("My fictional view has changed.")
+        final = editor.input_value()
+        assert final.startswith(expected) and final.endswith("My fictional view has changed.")
+        wait_until(page, lambda: repo.document(path)["long_notes"] == final,
+                   "An edited revision did not persist")
+        page.reload()
+        expect(page.locator(NOTES)).to_have_value(final)
+        assert repo.document(path)["highlights"][0]["still_agree_at"] == edition["date"]
+
+
+def edition_arrivals_and_done(browser, base):
+    for mobile in (False, True):
+        repo, _ = edition_repository()
+        with session(browser, base, repo, mobile=mobile, preserve_mode=True) as (page, repo, _):
+            expect(page.locator("body")).to_have_attribute("data-mode", "edition")
+            expect(page.locator(".edition-pick")).to_have_count(3)
+            assert page.locator(".edition-pick").evaluate_all("rows => rows.map(row => row.dataset.slug)") == [
+                "essay-01", "essay-02", "essay-03"]
+            expect(page.locator(".edition-masthead")).to_contain_text("25")
+            expect(page.locator(".edition-masthead")).to_contain_text("Fictional edition bot")
+            for slug, decision, progress in (("essay-06", "up-next", "new"), ("essay-07", "let-go", "let_go")):
+                row = page.locator(f'.edition-arrival[data-slug="{slug}"]')
+                row.locator(f'button[data-decision="{decision}"]').click()
+                expect(row).to_have_count(0)
+                persisted_state(page, repo, slug, progress, True)
+                if decision == "up-next":
+                    wait_until(page, lambda: slug in repo.document("user/queue.json")["queue"],
+                               "Edition Up next did not persist queue membership")
+                undo_last(page)
+                expect(row).to_be_visible()
+                persisted_state(page, repo, slug, "new", False)
+                wait_until(page, lambda: slug not in repo.document("user/queue.json")["queue"],
+                           "Edition arrival Undo retained queue membership")
+            for slug in ("essay-01", "essay-02", "essay-03"):
+                edition_open(page, slug)
+                if slug == "essay-03":
+                    page.locator("#reader-more > summary").click()
+                    page.locator("#let-go").click()
+                else:
+                    page.locator("#reader-pane").focus()
+                    page.keyboard.press("r")
+                persisted_state(page, repo, slug, "let_go" if slug == "essay-03" else "finished", True)
+            select_mode(page, "edition")
+            expect(page.locator(".edition-done")).to_be_visible()
+            expect(page.locator(".edition-done")).to_contain_text("done for today")
+            page.goto(base + "/")
+            expect(page.locator("body")).to_have_attribute("data-mode", "edition")
+            select_mode(page, "edition")
+            expect(page.locator(".edition-done")).to_be_visible()
+            expect(page.locator(".source-line")).to_have_count(0)
+            for selector in ("#read-toggle", "#reader-star", "#reader-more", "#progress-chip"):
+                expect(page.locator(selector)).not_to_be_visible()
+            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+
+def edition_real_fallbacks(browser, base):
+    for queued in (False, True):
+        repo = queued_repository() if queued else Repository()
+        with session(browser, base, repo, preserve_mode=True) as (page, repo, _):
+            expect(page.locator("body")).to_have_attribute("data-mode", "queue" if queued else "arrivals")
+            expect(page.locator('button[data-mode="edition"]:visible')).to_have_count(0)
+            expect(page.locator("#toast .toast-message")).to_have_count(0)
+            if queued:
+                expect(page.locator("#progress-chip")).to_have_text("New")
+                first = repo.document("user/queue.json")["queue"][0]
+                assert repo.document("user/state.json")[first]["progress"] == "new"
+            assert any(method == "GET" and path.startswith("bot/editions/") for method, path, _ in repo.requests)
+    for kind in ("bad-json", "partial", "missing-margin"):
+        repo, edition = edition_repository()
+        path = f'bot/editions/{edition["date"]}.json'
+        if kind == "bad-json":
+            repo.set(path, "{ definitely not JSON")
+        elif kind == "partial":
+            repo.set(path, {"date": edition["date"], "picks": [
+                edition["picks"][1], {"slot": "short", "slug": "unknown-fiction", "why": "No library entry"},
+                {"slot": "archive", "slug": "essay-03"}],
+                "margin": {"slug": "absent-fiction", "highlight_id": "missing"},
+                "arrivals": ["essay-06", "absent-fiction", "essay-06", None]})
+        else:
+            edition["picks"] = []
+            edition["margin"]["highlight_id"] = "not-a-highlight"
+            repo.set(path, edition)
+        with session(browser, base, repo, store_only=True) as (page, repo, _):
+            warnings = []
+            page.on("console", lambda message: warnings.append(message.text) if message.type == "warning" else None)
+            page.goto(base + "/")
+            expect(page.locator("body")).to_have_attribute("data-mode", "arrivals" if kind == "bad-json" else "edition")
+            expect(page.locator("#toast .toast-message")).to_have_count(0)
+            if kind == "bad-json":
+                expect(page.locator('button[data-mode="edition"]:visible')).to_have_count(0)
+            elif kind == "partial":
+                expect(page.locator(".edition-pick")).to_have_count(1)
+                expect(page.locator('.edition-pick[data-slug="essay-01"] .edition-why')).to_contain_text(
+                    "fictional orchard")
+                expect(page.locator(".edition-arrival")).to_have_count(1)
+                expect(page.locator(".edition-margin")).to_have_count(0)
+            else:
+                expect(page.locator(".edition-pick")).to_have_count(0)
+                expect(page.locator(".edition-margin")).to_have_count(0)
+                expect(page.locator(".edition-done:visible")).to_have_count(0)
+            if kind != "missing-margin":
+                assert any("edition" in warning.lower() for warning in warnings), warnings
+
+
+def edition_sync_and_midnight(browser, base):
+    repo, edition = edition_repository()
+    path = f'bot/editions/{edition["date"]}.json'
+    with session(browser, base, repo, preserve_mode=True) as (page, repo, _):
+        edition_open(page, "essay-01")
+        edition["picks"][1]["why"] = "A newly synced fictional recommendation."
+        repo.set(path, edition)
+        page.locator(NOTES).fill("A fictional edit triggers successful synchronization.")
+        wait_until(page, lambda: "user/notes/essay-01.json" in repo.files, "Sync trigger did not persist")
+        expect(page.locator('.edition-pick[data-slug="essay-01"] .edition-why')).to_contain_text(
+            "newly synced fictional recommendation")
+    # UTC is already the 25th; Los Angeles must still request its local 24th.
+    before_midnight = datetime(2026, 11, 25, 7, 59, 50, tzinfo=timezone.utc)
+    repo, tomorrow = edition_repository("2026-11-24")
+    tomorrow["date"] = "2026-11-25"
+    tomorrow["generated_at"] = "2026-11-25T00:00:00Z"
+    tomorrow["picks"][1]["why"] = "The next fictional day's recommendation."
+    repo.set("bot/editions/2026-11-25.json", tomorrow)
+    with session(browser, base, repo, preserve_mode=True, clock=before_midnight,
+                 timezone_id="America/Los_Angeles") as (page, repo, _):
+        expect(page.locator("body")).to_have_attribute("data-mode", "edition")
+        page.clock.run_for(31000)
+        expect(page.locator('.edition-pick[data-slug="essay-01"] .edition-why')).to_contain_text(
+            "next fictional day's recommendation")
+        assert any(method == "GET" and path == "bot/editions/2026-11-25.json" for method, path, _ in repo.requests)
+        assert not repo.puts, "Midnight edition refresh wrote user or bot data"
+
+
+def connection_decisions_and_missing_links(browser, base):
+    repo = Repository()
+    path = "user/notes/essay-01.json"
+    repo.set(path, {"long_notes": "Keep this unrelated fictional note.", "highlights": [],
+                    "links": [{"slug": "vanished-fiction", "title": "A vanished fictional notebook"}],
+                    "hidden_links": [], "updated_at": STAMP, "long_notes_updated_at": STAMP})
+    repo.set("bot/summaries/essay-01.md", "## Connections\n"
+             "- [Outdated third title](article:essay-03) — A fictional link.\n"
+             "- [Outdated fourth title](article:essay-04) — Another fictional link.\n"
+             "- [Unknown notebook](article:unknown-fiction) — Not in this library.\n")
+    with session(browser, base, repo) as (page, repo, _):
+        bot = page.locator("#bot-box")
+        third = bot.locator('.bot-connection[data-slug="essay-03"]')
+        fourth = bot.locator('.bot-connection[data-slug="essay-04"]')
+        unknown = bot.locator('.bot-connection[data-slug="unknown-fiction"]')
+        expect(third).to_contain_text("Fictional field notebook 03")
+        expect(third).not_to_contain_text("Outdated third title")
+        expect(unknown).to_contain_text("not in your library")
+        expect(unknown.locator(".bot-keep")).to_be_disabled()
+        missing = page.locator('.kept-link[data-slug="vanished-fiction"]')
+        expect(missing).to_contain_text("not in your library")
+        missing.locator(".kept-link-remove").click()
+        expect(missing).to_have_count(0)
+        undo_last(page)
+        expect(missing).to_be_visible()
+        third.locator(".bot-keep").click()
+        expect(third).to_contain_text("Kept")
+        expect(third.locator(".bot-unkeep")).to_be_visible()
+        kept = page.locator('.kept-link[data-slug="essay-03"]')
+        expect(kept).to_contain_text("Fictional field notebook 03")
+        wait_until(page, lambda: any(link["slug"] == "essay-03" for link in repo.document(path)["links"]),
+                   "Keep link did not persist")
+        third.locator(".bot-unkeep").click()
+        expect(kept).to_have_count(0)
+        wait_until(page, lambda: all(link["slug"] != "essay-03" for link in repo.document(path)["links"]),
+                   "Unkeep did not persist")
+        undo_last(page)
+        expect(kept).to_be_visible()
+        fourth.locator(".bot-hide").click()
+        expect(fourth).to_have_count(0)
+        wait_until(page, lambda: repo.document(path)["hidden_links"] == ["essay-04"], "Hide did not persist")
+        undo_last(page)
+        expect(fourth).to_be_visible()
+        wait_until(page, lambda: repo.document(path)["hidden_links"] == [], "Hide Undo did not persist")
+        fourth.locator(".bot-hide").click()
+        wait_until(page, lambda: repo.document(path)["hidden_links"] == ["essay-04"], "Second Hide did not persist")
+        before = repo.files[path]
+        bot.locator(".bot-show-hidden").click()
+        expect(fourth).to_be_visible()
+        page.wait_for_timeout(2300)
+        assert repo.files[path] == before, "Showing hidden suggestions changed stored decisions"
+        fourth.locator(".bot-keep").click()
+        wait_until(page, lambda: repo.document(path)["hidden_links"] == []
+                   and any(link["slug"] == "essay-04" for link in repo.document(path)["links"]),
+                   "Keeping a hidden suggestion did not clear hidden membership")
+        fourth.locator(".bot-unkeep").click()
+        fourth.locator(".bot-keep").click()
+        wait_until(page, lambda: len([link for link in repo.document(path)["links"] if link["slug"] == "essay-04"]) == 1,
+                   "Repeated Keep created duplicate links")
+        kept.locator(".kept-link-remove").click()
+        expect(kept).to_have_count(0)
+        wait_until(page, lambda: all(link["slug"] != "essay-03" for link in repo.document(path)["links"]),
+                   "Removing a kept link did not persist")
+        undo_last(page)
+        expect(kept).to_be_visible()
+        kept.locator('a[data-article="essay-03"]').focus()
+        page.keyboard.press("Enter")
+        opened(page, "essay-03")
+        open_item(page, "essay-01")
+        synced(page)
+        page.reload()
+        opened(page, "essay-01")
+        expect(page.locator('.kept-link[data-slug="essay-03"]')).to_have_count(1)
+        expect(page.locator('.kept-link[data-slug="essay-04"]')).to_have_count(1)
+        expect(page.locator('.kept-link[data-slug="vanished-fiction"]')).to_have_count(1)
+        saved = repo.document(path)
+        assert saved["long_notes"] == "Keep this unrelated fictional note."
+        assert len({link["slug"] for link in saved["links"]}) == len(saved["links"])
+        assert len(set(saved["hidden_links"])) == len(saved["hidden_links"])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("base_url", nargs="?", default=os.environ.get("READING_BASE_URL", "http://localhost:8765"))
+    parser.add_argument("base_url", nargs="?", default=os.environ.get("READING_BASE_URL", "http://localhost:8808"))
     parser.add_argument("--base", dest="base_override")
     args = parser.parse_args()
     base = (args.base_override or args.base_url).rstrip("/")
@@ -2040,7 +2378,9 @@ def main():
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(executable_path="/usr/bin/google-chrome", headless=True, args=["--no-sandbox"])
         try:
-            for scenario in (reading_defaults_and_empty_header, arrivals_decisions_and_persisted_undo,
+            for scenario in (edition_demo_and_returning, edition_margin_actions, edition_arrivals_and_done,
+                             edition_real_fallbacks, edition_sync_and_midnight, connection_decisions_and_missing_links,
+                             reading_defaults_and_empty_header, arrivals_decisions_and_persisted_undo,
                              queue_cap_and_conflict, queue_reorder_remove_and_reader_undo,
                              shelves_and_pile_batch, mobile_modes_and_touch_queue,
                              navigation_media_layout, indexed_search, debounce_status_and_growth,

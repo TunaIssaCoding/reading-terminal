@@ -8,6 +8,9 @@ import { createAutoFinish } from './progress.js';
 import { effectiveState, libraryFields, splitArrivals, defaultView } from './model.js';
 import { ModeViews } from './modes.js';
 import { triageDecision, undoDecision } from './triage.js';
+import { localDate, findMargin, setStillAgree, undoStillAgree } from './edition.js';
+import { EditionView } from './edition-view.js';
+import { connectionDecision, undoConnection } from './connections.js';
 
 const $ = selector => document.querySelector(selector);
 let clock = Date.now();
@@ -22,6 +25,7 @@ let store, libraryItems = [], state = {}, active = null, notes = emptyNotes(), b
 let openVersion = 0, connectionVersion = 0, query = '', tag = '', starredOnly = false, searchVersion = 0;
 let progressFilter = '', withNotes = false, shortOnly = false, sourceFilter = '';
 let mode = 'library', queue = { queue: [], arrivals_since: '' };
+let edition = null, editionDate = '', editionRequest = null;
 let positionTimer = null, pendingPosition = null, lastPositionSave = 0;
 let articleReady = false;
 let bodies = new Map(), searchIndex = new Map(), notesCache = new Map(), summaries = new Map();
@@ -60,10 +64,13 @@ const modes = new ModeViews({ root: $('#mode-content'), shelves: $('#shelves'),
   onOpen: openArticle, onDecision: decide, onRemove: id => decide(id, 'remove'),
   onReorder: ids => saveQueue({ ...queue, queue: ids }), onPile: startPile,
   getBody: slug => store.getArticle(slug) });
+const editionView = new EditionView({ root: $('#edition-content'), onOpen: openArticle,
+  onDecision: decide, onAgree: agreeWithMargin, onRevise: reviseMargin, onMode: setMode });
 const pane = new NotesPane({ root: $('#notes-content'), onChange: value => {
   if (!active) return;
   notes.long_notes = value; notes.long_notes_updated_at = now(); saveNotes();
-}, onOpen: openArticle, onJump: id => {
+}, onOpen: openArticle, getItem: slug => libraryItems.find(item => item.slug === slug),
+onRemoveLink: slug => changeConnection('unkeep', slug), onJump: id => {
   closeDrawers(); reader.edit(id);
   const editor = document.activeElement;
   if (editor?.matches('.interlinear-editor') && editor.dataset.id === id) editor.scrollIntoView({ block: 'center' });
@@ -74,25 +81,62 @@ const reader = new Reader({ root: $('#article-body'), warnings: $('#anchor-warni
 }, onQuote: quote => { showDrawer('notes'); pane.appendQuote(quote); }, onOpen: openArticle,
 getAsset: path => store.getAsset(path, active ? `articles/${active.slug}.md` : ''), notify, onDelete: deleteHighlight });
 const botBox = new BotBox({ root: $('#bot-box'), onOpen: openArticle,
-  onKeep: link => {
-    if (!active || notes.links.some(value => value.slug === link.slug)) return;
-    notes.links.push(link); saveNotes(); pane.updateLinks(notes.links);
-  },
-  onHide: slug => {
-    if (!active || notes.hidden_links.includes(slug)) return;
-    const article = active.slug, currentStore = store;
-    notes.hidden_links.push(slug); saveNotes();
-    notify('Suggestion hidden ·', { undo: async () => {
-      if (store !== currentStore) return;
-      const restored = structuredClone(notesCache.get(article) || await currentStore.getNotes(article));
-      restored.hidden_links = restored.hidden_links.filter(value => value !== slug);
-      restored.updated_at = now();
-      notesCache.set(article, restored);
-      await currentStore.saveNotes(article, restored);
-      if (active?.slug === article) { notes = restored; botBox.render(bot, notes); }
-    } });
-  },
+  getItem: slug => libraryItems.find(item => item.slug === slug),
+  onKeep: link => changeConnection('keep', link),
+  onUnkeep: slug => changeConnection('unkeep', slug),
+  onHide: slug => changeConnection('hide', slug),
 });
+
+function writeArticleNotes(slug, value) {
+  value.updated_at = now();
+  notesCache.set(slug, structuredClone(value));
+  if (active?.slug === slug) {
+    notes = value;
+    reader.updateHighlights(notes.highlights);
+    pane.setArticle(active, { ...notes, highlights: reader.getHighlights() });
+    botBox.render(bot, notes);
+  }
+  renderLibrary();
+  return store.saveNotes(slug, value);
+}
+function changeConnection(action, link) {
+  if (!active) return;
+  const slug = typeof link === 'string' ? link : link.slug;
+  const item = libraryItems.find(item => item.slug === slug);
+  if (action === 'keep' && !item) return;
+  const article = active.slug, currentStore = store, before = structuredClone(notes);
+  const after = connectionDecision(before, action, action === 'keep' ? { slug, title: item.title } : slug);
+  persist(writeArticleNotes(article, after));
+  const label = { keep: 'Link kept', unkeep: 'Link removed', hide: 'Suggestion hidden' }[action];
+  notify(`${label} ·`, { undo: () => {
+    if (store !== currentStore) return;
+    const current = notesCache.get(article);
+    if (!current) return;
+    return writeArticleNotes(article, undoConnection(current, before, after, slug));
+  } });
+}
+function agreeWithMargin() {
+  const highlight = findMargin(edition, notesCache.get(edition?.margin?.slug));
+  if (!highlight) return;
+  const article = edition.margin.slug, currentStore = store;
+  const before = structuredClone(notesCache.get(article));
+  const after = setStillAgree(before, highlight.id, localDate());
+  persist(writeArticleNotes(article, after));
+  notify('Still agree recorded ·', { undo: () => {
+    if (store !== currentStore) return;
+    const current = notesCache.get(article);
+    if (current) return writeArticleNotes(article, undoStillAgree(current, before, after, highlight.id));
+  } });
+}
+async function reviseMargin() {
+  const highlight = findMargin(edition, notesCache.get(edition?.margin?.slug));
+  if (!highlight) return;
+  const slug = edition.margin.slug, currentStore = store;
+  await openArticle(slug);
+  if (store !== currentStore || active?.slug !== slug || !bodies.has(slug)) return;
+  showDrawer('notes');
+  pane.reviseQuote(highlight.quote);
+}
 
 function items() {
   return libraryItems.map(item => ({ ...libraryFields(item), ...state[item.id],
@@ -105,15 +149,19 @@ function renderLibrary() {
   for (const button of document.querySelectorAll('button[data-mode]')) {
     const target = button.dataset.mode;
     button.textContent = target === 'arrivals' ? `Arrivals (${arrivals.length})`
-      : target === 'queue' ? `Up next (${queue.queue.length}/10)` : 'Library';
+      : target === 'queue' ? `Up next (${queue.queue.length}/10)` : target === 'edition' ? 'Edition' : 'Library';
+    if (target === 'edition') button.hidden = !edition;
     button.setAttribute('aria-pressed', String(target === mode || (target === 'arrivals' && mode === 'pile')));
   }
   $('#library-toggle').setAttribute('aria-pressed', String(mode === 'library'));
   $('.library-tools').hidden = mode !== 'library';
   $('#library-scroll').hidden = mode !== 'library';
   $('.sidebar-footer').hidden = mode !== 'library';
-  $('#mode-content').hidden = mode === 'library';
-  modes.render(mode, projected, { queue, arrivals_since: queue.arrivals_since, namespace: store?.namespace || 'locked', activeId: active?.id });
+  modes.render(mode === 'edition' ? 'library' : mode, projected,
+    { queue, arrivals_since: queue.arrivals_since, namespace: store?.namespace || 'locked', activeId: active?.id });
+  $('#mode-content').hidden = mode === 'library' || mode === 'edition';
+  $('#edition-content').hidden = mode !== 'edition';
+  if (mode === 'edition') editionView.render(edition, projected, notesCache.get(edition?.margin?.slug));
   if (mode === 'library') library.render(projected, { activeId: active?.id, query, tag, starredOnly, progress: progressFilter,
     withNotes, shortOnly, source: sourceFilter, bodies: new Map([...searchIndex, ...bodies]) });
   $('#library-total').textContent = `${libraryItems.length} items`;
@@ -130,13 +178,55 @@ function saveQueue(value) {
   renderLibrary();
 }
 function setMode(value) {
-  mode = value;
+  mode = value === 'edition' && !edition ? fallbackMode() : value;
   renderLibrary();
   document.body.classList.remove('sidebar-collapsed');
   closeDrawers();
   if (mobile()) showDrawer('library');
-  if (value !== 'library') $('#mode-content').focus({ preventScroll: true });
+  if (mode !== 'library') $(mode === 'edition' ? '#edition-content' : '#mode-content').focus({ preventScroll: true });
 }
+function fallbackMode() {
+  return defaultView(queue.queue, splitArrivals(libraryItems, state, queue.arrivals_since).arrivals);
+}
+async function refreshEdition(refresh = true) {
+  if (!store || !editionDate) return;
+  const currentStore = store, date = localDate();
+  if (editionRequest?.store === store && editionRequest.date === date) return editionRequest.promise;
+  if (date !== editionDate) {
+    editionDate = date;
+    edition = null;
+    renderLibrary();
+  }
+  const request = { store: currentStore, date };
+  request.promise = (async () => {
+    try {
+      const value = await currentStore.getEdition(date, { refresh });
+      if (store !== currentStore || date !== localDate()) return;
+      let changed = JSON.stringify(edition) !== JSON.stringify(value) || (!value && mode === 'edition');
+      edition = value;
+      if (!edition && mode === 'edition') mode = fallbackMode();
+      if (edition?.margin && !notesCache.has(edition.margin.slug)) {
+        const saved = await currentStore.getNotes(edition.margin.slug);
+        if (store !== currentStore || date !== localDate()) return;
+        if (!notesCache.has(edition.margin.slug)) {
+          notesCache.set(edition.margin.slug, saved);
+          changed = true;
+        }
+      }
+      if (changed) renderLibrary();
+    } catch (error) {
+      if (store === currentStore) handleError(error);
+    } finally {
+      if (editionRequest === request) editionRequest = null;
+    }
+  })();
+  editionRequest = request;
+  return request.promise;
+}
+function checkEditionDate() {
+  if (store && editionDate && editionDate !== localDate()) void refreshEdition();
+}
+setInterval(checkEditionDate, 30000);
 function startPile() {
   const pile = splitArrivals(items(), {}, queue.arrivals_since).pile;
   modes.startPile(pile.sort((a, b) => Date.parse(a.added_at) - Date.parse(b.added_at)).slice(0, 20).map(item => item.id));
@@ -327,7 +417,18 @@ function articleSlug() {
 async function openArticle(id, navigation = 'push', openingTime = null) {
   const item = currentItem(id) || items().find(item => item.slug === id);
   if (!item) { notify('That article is not in this library.'); return; }
-  if (active?.id === item.id && articleReady) return;
+  if (navigation !== 'preview') {
+    const timestamp = openingTime || now();
+    state[item.id] = { ...state[item.id], last_opened_at: timestamp };
+    if (item.progress === 'new') setProgress(item.id, 'reading');
+    else saveState();
+  }
+  if (active?.id === item.id && articleReady) {
+    if (navigation === 'push') history.pushState(null, '', `#${store.demo ? 'demo&' : ''}article=${encodeURIComponent(item.slug)}`);
+    updateReaderButtons();
+    closeDrawers();
+    return;
+  }
   flushPosition();
   const version = ++openVersion;
   active = item; articleReady = false; notes = emptyNotes(); bot = '';
@@ -339,10 +440,6 @@ async function openArticle(id, navigation = 'push', openingTime = null) {
   const hash = `#${store.demo ? 'demo&' : ''}article=${encodeURIComponent(item.slug)}`;
   if (navigation === 'replace') history.replaceState(null, '', hash);
   else if (navigation === 'push' && location.hash !== hash) history.pushState(null, '', hash);
-  const timestamp = openingTime || now();
-  state[item.id] = { ...state[item.id], last_opened_at: timestamp };
-  if (item.progress === 'new') setProgress(item.id, 'reading');
-  else saveState();
   try {
     const [markdown, savedNotes, summary] = await Promise.all([store.getArticle(item.slug), store.getNotes(item.slug), store.getSummary(item.slug)]);
     if (version !== openVersion) return;
@@ -379,13 +476,14 @@ async function connect(settings = getSettings()) {
   store = new ReadingStore(settings); const currentStore = store;
   autoFinish.clear(); syncedAt = null;
   libraryItems = []; state = {}; active = null; mode = 'library'; queue = { queue: [], arrivals_since: '' };
+  edition = null; editionDate = ''; editionRequest = null;
   bodies = new Map(); searchIndex = new Map(); notesCache = new Map(); summaries = new Map();
   $('#mode-badge').textContent = settings.token ? 'PRIVATE' : 'DEMO';
   store.addEventListener('change', event => {
     if (store !== currentStore) return;
     const { status, message } = event.detail;
     $('#sync-status').dataset.status = status;
-    if (status === 'synced') { syncedAt = new Date(); updateSyncTime(); }
+    if (status === 'synced') { syncedAt = new Date(); updateSyncTime(); void refreshEdition(); }
     else { $('#sync-status').textContent = message; $('#sync-status').title = message; }
   });
   store.addEventListener('state-updated', event => {
@@ -428,7 +526,10 @@ async function connect(settings = getSettings()) {
     if (version !== connectionVersion) return;
     libraryItems = initial.library; state = initial.state || {};
     queue = initial.queue;
-    mode = defaultView(queue.queue, splitArrivals(libraryItems, state, queue.arrivals_since).arrivals);
+    editionDate = localDate();
+    await refreshEdition();
+    if (version !== connectionVersion) return;
+    mode = defaultView(queue.queue, splitArrivals(libraryItems, state, queue.arrivals_since).arrivals, edition);
     const sourceSelect = $('#source-filter');
     sourceSelect.replaceChildren(new Option('All sources', ''));
     for (const label of [...new Set(libraryItems.map(item => libraryFields(item).source_label).filter(Boolean))].sort()) {
@@ -437,9 +538,13 @@ async function connect(settings = getSettings()) {
     sourceSelect.value = sourceFilter;
     renderLibrary();
     const slug = articleSlug();
-    const first = libraryItems.find(item => item.slug === slug)
-      || (!slug && store.demo && mode === 'queue' ? libraryItems.find(item => item.id === queue.queue[0]) : null);
-    if (first) await openArticle(first.id, 'replace');
+    const defaultPick = !slug && mode === 'edition'
+      ? ['long', 'short', 'archive'].map(slot => edition.picks.find(pick => pick.slot === slot))
+        .map(pick => pick && items().find(item => item.slug === pick.slug))
+        .find(item => item && !['finished', 'let_go'].includes(item.progress))
+      : !slug && mode === 'queue' ? currentItem(queue.queue[0]) : null;
+    const first = libraryItems.find(item => item.slug === slug) || defaultPick;
+    if (first) await openArticle(first.id, slug ? 'replace' : 'preview');
     else {
       $('#article-header').replaceChildren(text('h1', libraryItems.length ? 'Choose something to read.' : 'A quiet place to read.'));
       reader.setArticle(''); pane.setArticle(null); botBox.render('', {}); updateReaderButtons();
@@ -471,6 +576,7 @@ async function disconnect() {
   const previous = store; store = null;
   active = null; articleReady = false; libraryItems = []; state = {}; notes = emptyNotes(); bot = '';
   queue = { queue: [], arrivals_since: '' }; mode = 'library';
+  edition = null; editionDate = ''; editionRequest = null;
   bodies.clear(); searchIndex.clear(); notesCache.clear(); summaries.clear();
   query = ''; tag = ''; starredOnly = false; progressFilter = ''; withNotes = false; shortOnly = false; sourceFilter = '';
   $('#search').value = ''; $('#search-status').textContent = ''; $('#progress-filter').value = ''; $('#source-filter').value = '';
@@ -538,6 +644,11 @@ $('#reader-pane').addEventListener('scroll', () => {
   $('#reading-progress').textContent = `${Math.round(progress * 100)}%`;
   const item = currentItem();
   if (!item) return;
+  if (item.progress === 'new' && paneEl.scrollTop > 0) {
+    state[item.id] = { ...state[item.id], last_opened_at: now() };
+    setProgress(item.id, 'reading');
+    item.progress = 'reading';
+  }
   const change = paneEl.scrollTop > 0 || progress < .9 ? tracker(item.id).observe(item.progress, progress) : null;
   if (item.progress === 'reading') {
     pendingPosition = { id: item.id, position: progress };
@@ -595,7 +706,10 @@ function showDrawer(which) {
   $('#sidebar').inert = which !== 'library';
   $('#notes-pane').inert = which !== 'notes';
   $('#reader-pane').inert = true;
-  if (which === 'library') { if (mode === 'library') $('#search').focus(); else $('#mode-content').focus({ preventScroll: true }); }
+  if (which === 'library') {
+    if (mode === 'library') $('#search').focus();
+    else $(mode === 'edition' ? '#edition-content' : '#mode-content').focus({ preventScroll: true });
+  }
   else pane.focus();
 }
 function closeDrawers() {
@@ -712,7 +826,8 @@ function closeArticle(navigation = 'push') {
   if (mobile()) showDrawer('library');
   else {
     document.body.classList.remove('sidebar-collapsed'); closeDrawers();
-    if (mode === 'library') library.move(0); else $('#mode-content').focus({ preventScroll: true });
+    if (mode === 'library') library.move(0);
+    else $(mode === 'edition' ? '#edition-content' : '#mode-content').focus({ preventScroll: true });
   }
 }
 document.addEventListener('keydown', e => {
@@ -749,15 +864,20 @@ document.addEventListener('keydown', e => {
   const move = delta => {
     if (mobile()) showDrawer('library');
     else { document.body.classList.remove('sidebar-collapsed'); closeDrawers(); }
-    if (mode === 'library') library.move(delta); else modes.move(delta);
+    if (mode === 'library') library.move(delta);
+    else if (mode === 'edition') editionView.move(delta);
+    else modes.move(delta);
   };
   const actions = {
     j: () => move(1), k: () => move(-1), r: toggleRead, s: () => toggleStar(),
     h: () => reader.highlight(), n: () => { showDrawer('notes'); pane.focus(); },
     '/': () => { setMode('library'); $('#search').focus(); }, '?': showHelp
   };
-  if (e.key === 'Enter' && (!e.target.closest('button,a,summary') || e.target.matches('.library-title, .queue-open'))) {
-    e.preventDefault(); if (mode === 'library') library.openFocused(); else modes.openFocused();
+  if (e.key === 'Enter' && (!e.target.closest('button,a,summary') || e.target.matches('.library-title, .queue-open, .edition-open'))) {
+    e.preventDefault();
+    if (mode === 'library') library.openFocused();
+    else if (mode === 'edition') editionView.openFocused();
+    else modes.openFocused();
   } else if (actions[e.key]) { e.preventDefault(); actions[e.key](); }
 });
 function restoreArticle() {
@@ -774,7 +894,10 @@ function restoreArticle() {
 window.addEventListener('popstate', restoreArticle);
 window.addEventListener('hashchange', restoreArticle);
 window.addEventListener('blur', () => { flushPosition(); if (store) persist(store.flush()); });
-document.addEventListener('visibilitychange', () => { if (document.hidden && store) { flushPosition(); persist(store.flush()); } });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && store) { flushPosition(); persist(store.flush()); }
+  else checkEditionDate();
+});
 window.addEventListener('online', () => { if (store) persist(store.flush()); });
 closeDrawers(); void access.start();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { /* The app still works when service workers are disabled. */ });

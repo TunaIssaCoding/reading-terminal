@@ -16,9 +16,21 @@ function highlightStart(highlight) {
   return position(highlight.start ?? highlight.start_offset ?? highlight.anchor?.start ?? highlight.anchor?.offset);
 }
 
+function quotedDraft(base, quote) {
+  const current = base.trimEnd();
+  return `${current}${current ? '\n\n' : ''}${quote}\n\n`;
+}
+
+function meaningfulText(value) {
+  return value.trim().replace(/\s+/g, ' ');
+}
+
 export class NotesPane {
-  constructor({ root, onChange, onOpen, onJump, notify }) {
+  constructor({ root, getItem, onChange, onOpen, onRemoveLink, onJump, notify }) {
     this.root = root;
+    this.getItem = getItem;
+    this.onRemoveLink = onRemoveLink;
+    this.quoteDraft = null;
     this.onChange = onChange;
     this.onOpen = onOpen;
     this.onJump = onJump;
@@ -60,7 +72,26 @@ export class NotesPane {
     linksSection.append(linksHeading, this.links);
     root.replaceChildren(editorSection, divider, marginSection, linksSection);
 
-    this.textarea.addEventListener('input', () => { this.autogrow(); this.onChange?.(this.textarea.value); });
+    this.textarea.addEventListener('input', event => {
+      this.autogrow();
+      if (event.isComposing) return;
+      if (this.quoteDraft) {
+        const value = meaningfulText(this.textarea.value);
+        if (value === meaningfulText(this.quoteDraft.value)) return;
+        const unchanged = value === meaningfulText(this.quoteDraft.base);
+        this.quoteDraft = null;
+        if (unchanged) return;
+      }
+      this.onChange?.(this.textarea.value);
+    });
+    this.textarea.addEventListener('keydown', event => {
+      if (event.key !== 'Escape' || !this.quoteDraft) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.textarea.value = this.quoteDraft.base;
+      this.quoteDraft = null;
+      this.autogrow();
+    });
     let previousWidth = 0;
     this.resize = new ResizeObserver(entries => {
       const width = entries[0].contentRect.width;
@@ -134,10 +165,18 @@ export class NotesPane {
   }
 
   setArticle(item, notes = {}) {
-    this.articleId = item ? String(item.id ?? item.slug) : null;
+    const articleId = item ? String(item.id ?? item.slug) : null;
+    if (articleId !== this.articleId) this.quoteDraft = null;
+    this.articleId = articleId;
     this.textarea.disabled = !item;
     const value = String(notes?.long_notes ?? '');
-    if (this.textarea.value !== value) this.textarea.value = value;
+    if (this.quoteDraft) {
+      if (value !== this.quoteDraft.base) {
+        this.quoteDraft.base = value;
+        this.quoteDraft.value = quotedDraft(value, this.quoteDraft.quote);
+        this.textarea.value = this.quoteDraft.value;
+      }
+    } else if (this.textarea.value !== value) this.textarea.value = value;
     this.autogrow();
     this.textarea.setAttribute('aria-label', item ? `Long notes for ${item.title || 'this article'}` : 'Long notes');
     this.clearDrag();
@@ -186,10 +225,20 @@ export class NotesPane {
       if (!link || typeof link.slug !== 'string' || !/^[a-z\d][a-z\d_-]*$/i.test(link.slug) || seen.has(link.slug)) continue;
       seen.add(link.slug);
       const row = element('p', 'kept-link');
-      const anchor = element('a', '', link.title || link.slug);
-      anchor.href = `#article=${encodeURIComponent(link.slug)}`;
-      anchor.dataset.article = link.slug;
+      row.dataset.slug = link.slug;
+      const item = this.getItem?.(link.slug);
+      const anchor = element(item ? 'a' : 'span', '', item?.title || link.title || link.slug);
+      if (item) {
+        anchor.href = `#article=${encodeURIComponent(link.slug)}`;
+        anchor.dataset.article = link.slug;
+      }
       row.append(anchor);
+      if (!item) row.append(element('span', 'connection-missing', 'not in your library'));
+      const remove = element('button', 'kept-link-remove', 'Remove');
+      remove.type = 'button';
+      remove.setAttribute('aria-label', `Remove link to ${item?.title || link.title || link.slug}`);
+      remove.addEventListener('click', () => this.onRemoveLink?.(link.slug));
+      row.append(remove);
       fragment.append(row);
     }
     if (!seen.size) fragment.append(element('p', 'empty-state', 'Links you keep will appear here.'));
@@ -200,8 +249,25 @@ export class NotesPane {
     this.textarea.focus();
   }
 
+  reviseQuote(quote) {
+    if (this.articleId === null || typeof quote !== 'string' || !quote.trim()) return false;
+    const base = this.quoteDraft?.base ?? this.textarea.value;
+    const quoted = quote.trim().replace(/\r\n?/g, '\n').split('\n').map(line => `> ${line}`).join('\n');
+    const value = quotedDraft(base, quoted);
+    this.quoteDraft = { base, quote: quoted, value };
+    this.textarea.value = value;
+    this.autogrow();
+    this.focus();
+    this.textarea.setSelectionRange(value.length, value.length);
+    const pane = this.root.closest('aside') || this.root;
+    const bottom = this.textarea.getBoundingClientRect().bottom - pane.getBoundingClientRect().bottom;
+    if (bottom > 0) pane.scrollTop += bottom + 16;
+    return true;
+  }
+
   appendQuote(quote) {
     if (this.articleId === null || typeof quote !== 'string' || !quote.trim()) return false;
+    this.quoteDraft = null;
     const current = this.textarea.value.trimEnd();
     const quoted = quote.trim().replace(/\r\n?/g, '\n').split('\n').map(line => `> ${line}`).join('\n');
     this.textarea.value = `${current}${current ? '\n\n' : ''}${quoted}`;

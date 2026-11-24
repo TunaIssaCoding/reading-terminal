@@ -224,3 +224,24 @@ test('Undo of a synced Hide removes only that slug, preserving a concurrent inde
   assert.deepEqual(mergeNotes(local, remote, base).hidden_links, ['keep-hidden']);
   assert.deepEqual(mergeNotes(remote, local, base).hidden_links, ['keep-hidden']);
 });
+
+test('kept-link removals beat an unchanged copy while independent additions and Hides survive', () => {
+  const known = { slug: 'known', title: 'Known' };
+  const base = { long_notes: 'Original note', links: [known], hidden_links: ['previous'] };
+  const local = { ...base, links: [], hidden_links: ['previous', 'local-hidden'] };
+  const remote = { ...base, links: [known, known, { slug: 'new', title: 'New' }], hidden_links: ['previous', 'remote-hidden'] };
+  const result = mergeNotes(local, remote, base);
+  assert.deepEqual(result.links, [{ slug: 'new', title: 'New' }]);
+  assert.deepEqual(result.hidden_links, ['local-hidden', 'previous', 'remote-hidden']);
+  assert.deepEqual(mergeNotes(remote, local, base), result);
+  assert.deepEqual(mergeNotes(result, remote, base), result);
+});
+
+test('keeping a previously hidden link clears only its hidden membership across sync', () => {
+  const base = { links: [], hidden_links: ['known', 'other'] };
+  const local = { links: [{ slug: 'known', title: 'Known' }], hidden_links: ['other'] };
+  const remote = { links: [{ slug: 'remote', title: 'Remote' }], hidden_links: ['known', 'other', 'remote-hidden'] };
+  const merged = mergeNotes(local, remote, base);
+  assert.deepEqual(merged.links.map(link => link.slug), ['known', 'remote']);
+  assert.deepEqual(merged.hidden_links, ['other', 'remote-hidden']);
+});

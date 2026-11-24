@@ -83,6 +83,7 @@
     </div>
   </section>
   <header class="topbar">
+    <button id="edition-mode" class="text-button" data-mode="edition" hidden>Edition</button>
     <button id="arrivals-mode" class="text-button" data-mode="arrivals">Arrivals (0)</button>
     <button id="queue-mode" class="text-button" data-mode="queue">Up next (0/10)</button>
     <button id="library-toggle" class="text-button" aria-label="Toggle library" aria-controls="sidebar" aria-expanded="true">Library</button>
@@ -107,12 +108,14 @@
     </div>
   </header>
   <nav id="mobile-modes" aria-label="Reading modes">
+    <button data-mode="edition" hidden>Edition</button>
     <button data-mode="arrivals">Arrivals (0)</button>
     <button data-mode="queue">Up next (0/10)</button>
     <button data-mode="library">Library</button>
   </nav>
   <div class="workspace">
     <aside id="sidebar" aria-label="Reading library">
+      <section id="edition-content" class="edition-view" tabindex="-1" aria-label="Today's edition" hidden></section>
       <section id="mode-content" tabindex="-1" aria-label="Reading decisions" hidden></section>
       <div class="library-tools">
         <div class="section-eyebrow">YOUR LIBRARY <span id="library-total">0 items</span></div>
