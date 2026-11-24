@@ -3,17 +3,23 @@ import { Library } from './library.js';
 import { NotesPane } from './notes.js';
 import { Reader } from './reader.js';
 import { VaultAccess } from './auth.js';
+import { BotBox } from './bot.js';
+import { createAutoFinish } from './progress.js';
+import { effectiveState, libraryFields } from './model.js';
 
 const $ = selector => document.querySelector(selector);
-const now = () => new Date().toISOString();
-const emptyNotes = () => ({ long_notes: '', highlights: [], updated_at: '' });
+let clock = Date.now();
+const now = () => new Date(clock = Math.max(Date.now(), clock + 1)).toISOString();
+const emptyNotes = () => ({ long_notes: '', highlights: [], links: [], hidden_links: [], updated_at: '' });
 const text = (tag, value, className) => {
   const el = document.createElement(tag); el.textContent = value;
   if (className) el.className = className;
   return el;
 };
-let store, libraryItems = [], state = {}, meta = {}, active = null, notes = emptyNotes(), bot = '';
+let store, libraryItems = [], state = {}, active = null, notes = emptyNotes(), bot = '';
 let openVersion = 0, connectionVersion = 0, query = '', tag = '', starredOnly = false, searchVersion = 0;
+let progressFilter = '', withNotes = false, shortOnly = false, sourceFilter = '';
+let positionTimer = null, pendingPosition = null, lastPositionSave = 0;
 let articleReady = false;
 let bodies = new Map(), searchIndex = new Map(), notesCache = new Map(), summaries = new Map();
 let syncedAt = null;
@@ -46,82 +52,118 @@ function notify(message, { undo, commit } = {}) {
 }
 function handleError(error) { notify(error.message || String(error)); }
 const persist = promise => Promise.resolve(promise).catch(handleError);
-const library = new Library({ root: $('#library'), onOpen: openArticle, onStar: toggleStar, onStatus: setStatus, onTag: filterTag });
+const library = new Library({ root: $('#library'), onOpen: openArticle, onStar: toggleStar, onProgress: chooseProgress, onTag: filterTag });
 const pane = new NotesPane({ root: $('#notes-content'), onChange: value => {
   if (!active) return;
   notes.long_notes = value; notes.long_notes_updated_at = now(); saveNotes();
-}, onOpen: openArticle, notify });
+}, onOpen: openArticle, onJump: id => {
+  closeDrawers(); reader.edit(id);
+  const editor = document.activeElement;
+  if (editor?.matches('.interlinear-editor') && editor.dataset.id === id) editor.scrollIntoView({ block: 'center' });
+}, notify });
 const reader = new Reader({ root: $('#article-body'), warnings: $('#anchor-warnings'), onChange: highlights => {
   if (!active) return;
   notes.highlights = highlights; pane.updateMargins(highlights.filter(h => !h.deleted)); saveNotes();
 }, onQuote: quote => { showDrawer('notes'); pane.appendQuote(quote); }, onOpen: openArticle,
 getAsset: path => store.getAsset(path, active ? `articles/${active.slug}.md` : ''), notify, onDelete: deleteHighlight });
+const botBox = new BotBox({ root: $('#bot-box'), onOpen: openArticle,
+  onKeep: link => {
+    if (!active || notes.links.some(value => value.slug === link.slug)) return;
+    notes.links.push(link); saveNotes(); pane.updateLinks(notes.links);
+  },
+  onHide: slug => {
+    if (!active || notes.hidden_links.includes(slug)) return;
+    const article = active.slug, currentStore = store;
+    notes.hidden_links.push(slug); saveNotes();
+    notify('Suggestion hidden ·', { undo: async () => {
+      if (store !== currentStore) return;
+      const restored = structuredClone(notesCache.get(article) || await currentStore.getNotes(article));
+      restored.hidden_links = restored.hidden_links.filter(value => value !== slug);
+      restored.updated_at = now();
+      notesCache.set(article, restored);
+      await currentStore.saveNotes(article, restored);
+      if (active?.slug === article) { notes = restored; botBox.render(bot, notes); }
+    } });
+  },
+});
 
 function items() {
-  return libraryItems.map(item => ({ ...item, status: item.status || 'unread', ...state[item.id], notes: notesCache.get(item.slug) }));
+  return libraryItems.map(item => ({ ...libraryFields(item), ...state[item.id],
+    ...effectiveState(item, state[item.id]), notes: notesCache.get(item.slug) }));
 }
 function renderLibrary() {
-  library.render(items(), { activeId: active?.id, query, tag, starredOnly, bodies: new Map([...searchIndex, ...bodies]), meta });
+  library.render(items(), { activeId: active?.id, query, tag, starredOnly, progress: progressFilter,
+    withNotes, shortOnly, source: sourceFilter, bodies: new Map([...searchIndex, ...bodies]) });
   $('#library-total').textContent = `${libraryItems.length} items`;
   $('#tag-filter').hidden = !tag; $('#tag-filter').textContent = `${tag} ×`;
   $('#star-filter').setAttribute('aria-pressed', String(starredOnly));
+  $('#notes-filter').setAttribute('aria-pressed', String(withNotes));
+  $('#short-filter').setAttribute('aria-pressed', String(shortOnly));
 }
 function currentItem(id = active?.id) { return items().find(item => String(item.id) === String(id)); }
 function saveState() { persist(store.saveState(state)); renderLibrary(); updateReaderButtons(); }
-function setStatus(id, status, commentedFrom = null) {
+function setProgress(id, progress) {
   const item = currentItem(id); if (!item) return;
+  if (pendingPosition?.id === id) flushPosition();
   const timestamp = now();
-  state[item.id] = { ...state[item.id], status, commented_from: commentedFrom, status_changed_at: timestamp, status_updated_at: timestamp };
+  state[item.id] = { ...state[item.id], progress, progress_changed_at: timestamp,
+    triaged_at: item.triaged_at || (progress !== 'new' ? timestamp : null) };
   saveState();
 }
-const autoReadUndone = new Set();
-function automaticStatus(id, status, commentedFrom = null) {
+const autoFinish = new Map();
+function tracker(id) {
+  if (!autoFinish.has(id)) autoFinish.set(id, createAutoFinish());
+  return autoFinish.get(id);
+}
+function progressWithUndo(id, progress, message, undoProgress) {
   const before = currentItem(id), currentStore = store;
-  if (!before || before.status === status) return;
-  setStatus(id, status, commentedFrom);
-  const changedAt = state[id].status_updated_at;
-  return notify(`Marked ${status} automatically.`, { undo: () => {
-    if (store !== currentStore || state[id]?.status_updated_at !== changedAt) return;
-    if (status === 'read') autoReadUndone.add(String(id));
-    setStatus(id, before.status, before.commented_from || null);
+  if (!before || before.progress === progress) return;
+  setProgress(id, progress);
+  const changedAt = state[id].progress_changed_at;
+  notify(message, { undo: () => {
+    if (store !== currentStore || state[id]?.progress_changed_at !== changedAt) return;
+    setProgress(id, undoProgress ? undoProgress() : before.progress);
   } });
+}
+function chooseProgress(id, progress) {
+  if (progress === 'let_go') progressWithUndo(id, progress, 'Let go ·');
+  else setProgress(id, progress);
 }
 function toggleRead() {
   const item = currentItem(); if (!item) return;
-  if (item.status === 'commented') { notify('Commented takes priority. Use the item menu to set a different status.'); return; }
-  setStatus(item.id, item.status === 'read' ? 'unread' : 'read');
+  setProgress(item.id, item.progress === 'finished' ? 'reading' : 'finished');
 }
 function toggleStar(id = active?.id) {
   const item = currentItem(id); if (!item) return;
-  state[item.id] = { ...state[item.id], starred: !item.starred, starred_updated_at: now() };
+  state[item.id] = { ...state[item.id], starred: !item.starred };
   saveState();
 }
 function updateReaderButtons() {
   const item = currentItem();
   $('#read-toggle').disabled = !item;
   $('#reader-star').disabled = !item;
+  $('#reader-more').hidden = !item;
+  $('#progress-chip').hidden = !item;
   if (!item) return;
-  $('#read-toggle').textContent = item.status === 'commented' ? 'Commented' : item.status === 'read' ? 'Mark unread · r' : 'Mark read · r';
-  $('#reader-star').textContent = item.starred ? '★' : '☆';
+  const labels = { new: 'New', reading: `Reading · ${Math.round((item.position || 0) * 100)}%`, finished: 'Finished', let_go: 'Let go' };
+  $('#progress-chip').textContent = labels[item.progress];
+  $('#read-toggle').textContent = item.progress === 'finished' ? 'Mark reading · r' : 'Mark finished · r';
+  $('#reader-star').textContent = '★ Keeper · s';
   $('#reader-star').setAttribute('aria-pressed', String(Boolean(item.starred)));
-  $('#reader-star').setAttribute('aria-label', item.starred ? 'Unstar current article' : 'Star current article');
+  $('#reader-star').setAttribute('aria-label', `${item.starred ? 'Remove' : 'Add'} Keeper — worth coming back to`);
 }
 function saveNotes() {
   notes.updated_at = now(); notesCache.set(active.slug, structuredClone(notes));
   persist(store.saveNotes(active.slug, notes));
-  const item = currentItem();
-  const hasNotes = notes.long_notes.trim() || notes.highlights.some(h => !h.deleted && h.note?.trim());
-  if (hasNotes && item.status !== 'commented') automaticStatus(item.id, 'commented', item.status);
-  else if (!hasNotes && item.status === 'commented' && item.commented_from) automaticStatus(item.id, item.commented_from);
-  else renderLibrary();
+  botBox.render(bot, notes);
+  renderLibrary();
 }
 function deleteHighlight(highlight) {
   if (!active) return;
-  const slug = active.slug, id = active.id, currentStore = store, before = currentItem(id);
+  const slug = active.slug, currentStore = store;
   notes.highlights = notes.highlights.filter(item => item.id !== highlight.id);
   reader.close(); reader.updateHighlights(notes.highlights); pane.updateMargins(notes.highlights);
   saveNotes();
-  const deletionStatusTime = state[id]?.status_updated_at;
   notify('Highlight deleted.', { undo: async () => {
     if (store !== currentStore) return;
     const restored = structuredClone(notesCache.get(slug) || await currentStore.getNotes(slug));
@@ -131,9 +173,6 @@ function deleteHighlight(highlight) {
     restored.updated_at = now(); notesCache.set(slug, restored);
     await currentStore.saveNotes(slug, restored);
     if (store !== currentStore) return;
-    if (state[id]?.status_updated_at === deletionStatusTime && currentItem(id)?.status !== before.status) {
-      setStatus(id, before.status, before.commented_from || null);
-    }
     if (active?.slug === slug) {
       notes = restored; reader.updateHighlights(notes.highlights); pane.updateMargins(reader.getHighlights());
     }
@@ -150,7 +189,7 @@ function externalLink(label, href) {
 }
 function renderHeader(item) {
   const root = $('#article-header'); root.replaceChildren();
-  root.append(text('p', `${item.source_type || 'ESSAY'} / ${Math.max(1, Math.ceil((item.words || 600) / 220))} MIN READ`.toUpperCase(), 'article-kicker'));
+  root.append(text('p', `${item.source_label || item.source_type || 'ESSAY'} / ${item.read_minutes} MIN READ`.toUpperCase(), 'article-kicker'));
   root.append(text('h1', item.title, item.title_is_generated ? 'title-generated' : ''));
   const byline = text('div', '', 'article-byline');
   byline.append(text('span', [item.author, item.handle].filter(Boolean).join(' ')));
@@ -158,19 +197,23 @@ function renderHeader(item) {
     const date = new Date(item.created_at);
     if (!Number.isNaN(date.getTime())) { const dateEl = text('time', date.toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' })); dateEl.dateTime = item.created_at; byline.append(dateEl); }
   }
-  const source = externalLink('Source ↗', item.url); if (source) byline.append(source);
-  const pdf = externalLink('PDF ↗', item.pdf_url);
-  if (pdf) byline.append(pdf);
+  const source = $('#open-source'), pdf = $('#open-pdf');
+  source.removeAttribute('href'); pdf.removeAttribute('href');
+  source.hidden = true; pdf.hidden = true;
+  const sourceLink = externalLink('', item.url);
+  if (sourceLink) { source.href = sourceLink.href; source.hidden = false; }
+  const pdfLink = externalLink('', item.pdf_url);
+  if (pdfLink) { pdf.href = pdfLink.href; pdf.hidden = false; }
   else if (item.pdf_path) {
-    const link = text('a', 'Loading PDF…');
-    link.target = '_blank'; link.rel = 'noopener noreferrer';
-    byline.append(link);
+    pdf.hidden = false; pdf.textContent = 'Loading PDF…';
+    const currentStore = store;
     store.getAsset(item.pdf_path).then(url => {
-      if (link.isConnected) { link.href = url; link.textContent = 'PDF ↗'; }
+      if (active?.id === item.id && store === currentStore) { pdf.href = url; pdf.textContent = 'Open PDF'; }
     }).catch(() => {
-      if (link.isConnected) { link.textContent = 'PDF unavailable'; link.title = 'The PDF is missing or unavailable offline.'; }
+      if (active?.id === item.id && store === currentStore) { pdf.textContent = 'PDF unavailable'; pdf.title = 'The PDF is missing or unavailable offline.'; }
     });
   }
+  if (pdfLink) pdf.textContent = 'Open PDF';
   root.append(byline);
   const tags = text('div', '', 'article-tags');
   for (const value of item.tags || []) {
@@ -181,7 +224,7 @@ function renderHeader(item) {
     const summary = text('section', '', 'article-summary bot-content');
     summary.append(text('div', `Summary · from intake${item.summary_by ? ` · ${item.summary_by}` : ''}`, 'bot-label'), text('p', item.summary));
     root.append(summary);
-  }
+  } else if (item.lede) root.append(text('p', item.lede, 'article-lede'));
 }
 function renderImages(item) {
   $('#article-header .article-images')?.remove();
@@ -210,8 +253,10 @@ async function openArticle(id, navigation = 'push') {
   const item = currentItem(id) || items().find(item => item.slug === id);
   if (!item) { notify('That article is not in this library.'); return; }
   if (active?.id === item.id && articleReady) return;
+  flushPosition();
   const version = ++openVersion;
   active = item; articleReady = false; notes = emptyNotes(); bot = '';
+  botBox.render('', notes); $('#reader-more').open = false;
   renderHeader(item); renderLibrary(); updateReaderButtons();
   reader.setArticle('', []); $('#article-body').append(text('p', 'Opening article…', 'loading-message'));
   pane.setArticle(null); closeDrawers(); $('#reader-pane').scrollTop = 0;
@@ -219,8 +264,10 @@ async function openArticle(id, navigation = 'push') {
   const hash = `#${store.demo ? 'demo&' : ''}article=${encodeURIComponent(item.slug)}`;
   if (navigation === 'replace') history.replaceState(null, '', hash);
   else if (navigation === 'push' && location.hash !== hash) history.pushState(null, '', hash);
-  // Opens are not edits: include this timestamp only with the next real state change.
-  if (navigation !== 'replace') state[item.id] = { ...state[item.id], last_opened_at: now() };
+  const timestamp = now();
+  state[item.id] = { ...state[item.id], last_opened_at: timestamp };
+  if (item.progress === 'new') setProgress(item.id, 'reading');
+  else saveState();
   try {
     const [markdown, savedNotes, summary] = await Promise.all([store.getArticle(item.slug), store.getNotes(item.slug), store.getSummary(item.slug)]);
     if (version !== openVersion) return;
@@ -228,13 +275,20 @@ async function openArticle(id, navigation = 'push') {
     bodies.set(item.slug, content);
     notes = notesCache.get(item.slug) || savedNotes || emptyNotes();
     bot = summaries.get(item.slug) ?? summary;
-    notes.long_notes ||= ''; notes.highlights ||= [];
+    notes.long_notes ||= ''; notes.highlights ||= []; notes.links ||= []; notes.hidden_links ||= [];
     notesCache.set(item.slug, structuredClone(notes));
     reader.setArticle(content, notes.highlights);
     renderImages(item);
-    pane.setArticle(item, { ...notes, highlights: reader.getHighlights() }, bot);
-    articleReady = true;
-    renderLibrary(); $('#reading-progress').textContent = '0%';
+    pane.setArticle(item, { ...notes, highlights: reader.getHighlights() });
+    botBox.render(bot, notes);
+    const savedPosition = currentItem()?.position || 0;
+    if (savedPosition && currentItem()?.progress === 'reading') {
+      const paneEl = $('#reader-pane'), bodyEl = $('#article-body');
+      const bodyStart = bodyEl.getBoundingClientRect().top - paneEl.getBoundingClientRect().top + paneEl.scrollTop;
+      paneEl.scrollTop = Math.max(0, bodyStart + savedPosition * bodyEl.offsetHeight - paneEl.clientHeight);
+    }
+    requestAnimationFrame(() => { if (version === openVersion) articleReady = true; });
+    renderLibrary(); $('#reading-progress').textContent = `${Math.round(savedPosition * 100)}%`;
   } catch (error) {
     if (version !== openVersion) return;
     $('#article-body').replaceChildren(text('p', error.message, 'loading-message'));
@@ -245,9 +299,10 @@ async function openArticle(id, navigation = 'push') {
 
 async function connect(settings = getSettings()) {
   const version = ++connectionVersion; ++openVersion; ++searchVersion;
+  flushPosition();
   store?.dispose();
   store = new ReadingStore(settings); const currentStore = store;
-  autoReadUndone.clear(); syncedAt = null;
+  autoFinish.clear(); syncedAt = null;
   libraryItems = []; state = {}; active = null; bodies = new Map(); searchIndex = new Map(); notesCache = new Map(); summaries = new Map();
   $('#mode-badge').textContent = settings.token ? 'PRIVATE' : 'DEMO';
   store.addEventListener('change', event => {
@@ -266,7 +321,8 @@ async function connect(settings = getSettings()) {
     const { slug, notes: merged } = event.detail; notesCache.set(slug, merged);
     if (slug === active?.slug && articleReady) {
       notes = merged; reader.updateHighlights(merged.highlights || []);
-      pane.setArticle(active, { ...merged, highlights: reader.getHighlights() }, bot);
+      notes.links ||= []; notes.hidden_links ||= [];
+      pane.setArticle(active, { ...notes, highlights: reader.getHighlights() }); botBox.render(bot, notes);
     }
     renderLibrary();
   });
@@ -274,7 +330,7 @@ async function connect(settings = getSettings()) {
     if (store !== currentStore) return;
     summaries.set(event.detail.slug, event.detail.markdown);
     if (event.detail.slug === active?.slug && articleReady) {
-      bot = event.detail.markdown; pane.renderBot(bot);
+      bot = event.detail.markdown; botBox.render(bot, notes);
     }
   });
   store.addEventListener('article-updated', event => {
@@ -290,21 +346,31 @@ async function connect(settings = getSettings()) {
   try {
     const initial = await store.init();
     if (version !== connectionVersion) return;
-    libraryItems = initial.library; state = initial.state || {}; meta = initial.meta || {};
+    libraryItems = initial.library; state = initial.state || {};
+    const sourceSelect = $('#source-filter');
+    sourceSelect.replaceChildren(new Option('All sources', ''));
+    for (const label of [...new Set(libraryItems.map(item => libraryFields(item).source_label).filter(Boolean))].sort()) {
+      sourceSelect.add(new Option(label, label));
+    }
+    sourceSelect.value = sourceFilter;
     renderLibrary();
     const slug = articleSlug();
-    const first = libraryItems.find(item => item.slug === slug) || currentItem(library.visibleIds()[0]) || libraryItems[0];
+    const first = libraryItems.find(item => item.slug === slug);
     if (first) await openArticle(first.id, 'replace');
     else {
-      $('#article-header').replaceChildren(text('h1', 'A quiet place to read.'));
-      reader.setArticle('Your library is empty. Add items to `library.json` in the private data repository.'); pane.setArticle(null); updateReaderButtons();
+      $('#article-header').replaceChildren(text('h1', libraryItems.length ? 'Choose something to read.' : 'A quiet place to read.'));
+      reader.setArticle(''); pane.setArticle(null); botBox.render('', {}); updateReaderButtons();
+      if (mobile()) showDrawer('library');
     }
-    const commented = items().filter(item => item.status === 'commented');
+    const noteSlugs = await currentStore.getNoteSlugs();
     let index = 0;
-    await Promise.all(Array.from({ length: Math.min(4, commented.length) }, async () => {
-      while (index < commented.length && store === currentStore) {
-        const item = commented[index++];
-        try { const data = await currentStore.getNotes(item.slug); if (store === currentStore) notesCache.set(item.slug, data); } catch { /* Sync status reports unavailable remote data. */ }
+    await Promise.all(Array.from({ length: Math.min(4, noteSlugs.length) }, async () => {
+      while (index < noteSlugs.length && store === currentStore) {
+        const slug = noteSlugs[index++];
+        try {
+          const data = await currentStore.getNotes(slug);
+          if (store === currentStore && !notesCache.has(slug)) notesCache.set(slug, data);
+        } catch { /* Sync status reports unavailable remote data. */ }
       }
     }));
     if (store === currentStore) renderLibrary();
@@ -318,11 +384,13 @@ async function connect(settings = getSettings()) {
 
 async function disconnect() {
   ++connectionVersion; ++openVersion; ++searchVersion; clearTimeout(searchTimer);
+  flushPosition();
   const previous = store; store = null;
-  active = null; articleReady = false; libraryItems = []; state = {}; meta = {}; notes = emptyNotes(); bot = '';
+  active = null; articleReady = false; libraryItems = []; state = {}; notes = emptyNotes(); bot = '';
   bodies.clear(); searchIndex.clear(); notesCache.clear(); summaries.clear();
-  query = ''; tag = ''; starredOnly = false; $('#search').value = ''; $('#search-status').textContent = '';
-  reader.close(); reader.setArticle('', []); pane.setArticle(null); $('#article-header').replaceChildren();
+  query = ''; tag = ''; starredOnly = false; progressFilter = ''; withNotes = false; shortOnly = false; sourceFilter = '';
+  $('#search').value = ''; $('#search-status').textContent = ''; $('#progress-filter').value = ''; $('#source-filter').value = '';
+  reader.close(); reader.setArticle('', []); pane.setArticle(null); botBox.render('', {}); $('#article-header').replaceChildren();
   renderLibrary(); updateReaderButtons(); closeDrawers();
   $('#reader-position').textContent = 'THE READING ROOM'; $('#sync-status').textContent = '';
   closeMore(); for (const dismiss of [...notices]) dismiss();
@@ -360,16 +428,41 @@ $('#search').addEventListener('input', e => {
   else $('#search-status').textContent = '';
 });
 $('#star-filter').addEventListener('click', () => { starredOnly = !starredOnly; renderLibrary(); });
+$('#notes-filter').addEventListener('click', () => { withNotes = !withNotes; renderLibrary(); });
+$('#short-filter').addEventListener('click', () => { shortOnly = !shortOnly; renderLibrary(); });
+$('#progress-filter').addEventListener('change', e => { progressFilter = e.target.value; renderLibrary(); });
+$('#source-filter').addEventListener('change', e => { sourceFilter = e.target.value; renderLibrary(); });
 $('#tag-filter').addEventListener('click', () => { tag = ''; renderLibrary(); });
 $('#read-toggle').addEventListener('click', toggleRead);
 $('#reader-star').addEventListener('click', () => toggleStar());
+$('#let-go').addEventListener('click', () => { $('#reader-more').open = false; chooseProgress(active?.id, 'let_go'); });
+function flushPosition() {
+  clearTimeout(positionTimer); positionTimer = null;
+  if (!pendingPosition || !store) return;
+  const { id, position } = pendingPosition; pendingPosition = null;
+  if (currentItem(id)?.progress !== 'reading') return;
+  state[id] = { ...state[id], position };
+  lastPositionSave = Date.now(); saveState();
+}
 $('#reader-pane').addEventListener('scroll', () => {
   if (!articleReady) return;
   const paneEl = $('#reader-pane'), bodyEl = $('#article-body');
   const bodyStart = bodyEl.getBoundingClientRect().top - paneEl.getBoundingClientRect().top + paneEl.scrollTop;
   const progress = Math.max(0, Math.min(1, (paneEl.scrollTop + paneEl.clientHeight - bodyStart) / Math.max(1, bodyEl.offsetHeight)));
   $('#reading-progress').textContent = `${Math.round(progress * 100)}%`;
-  if (paneEl.scrollTop > 0 && progress >= .9 && currentItem()?.status === 'unread' && !autoReadUndone.has(String(active.id))) automaticStatus(active.id, 'read');
+  const item = currentItem();
+  if (!item) return;
+  const change = paneEl.scrollTop > 0 || progress < .9 ? tracker(item.id).observe(item.progress, progress) : null;
+  if (item.progress === 'reading') {
+    pendingPosition = { id: item.id, position: progress };
+    $('#progress-chip').textContent = `Reading · ${Math.round(progress * 100)}%`;
+    if (Date.now() - lastPositionSave >= 750) flushPosition();
+    else if (!positionTimer) positionTimer = setTimeout(flushPosition, 750 - (Date.now() - lastPositionSave));
+  }
+  if (paneEl.scrollTop > 0 && change) {
+    flushPosition();
+    progressWithUndo(item.id, change.progress, change.message, change.undo);
+  }
 }, { passive: true });
 
 const drawerMedia = matchMedia('(max-width: 860px)');
@@ -395,7 +488,7 @@ $('#view-toggle').addEventListener('click', () => {
 document.addEventListener('pointerdown', event => {
   const target = event.target.nodeType === Node.ELEMENT_NODE ? event.target : event.target.parentElement;
   if (!target?.closest('.topbar-more')) closeMore();
-  document.querySelectorAll('.item-status-menu[open]').forEach(menu => {
+  document.querySelectorAll('.item-progress-menu[open], #reader-more[open]').forEach(menu => {
     if (!menu.contains(event.target)) menu.open = false;
   });
 });
@@ -459,6 +552,11 @@ function showSettings() {
   const settings = getSettings();
   for (const key of ['owner', 'repo', 'branch', 'token']) $('#settings-form').elements[key].value = settings[key] || '';
   access.renderSecurity();
+  const currentStore = store;
+  $('#export-pre-v2').hidden = true;
+  if (currentStore) persist(currentStore.getPreV2Backup().then(raw => {
+    if (store === currentStore) $('#export-pre-v2').hidden = raw === null;
+  }));
   $('#connection-result').textContent = ''; $('#settings-dialog').showModal(); placeToasts();
 }
 function formSettings() { return Object.fromEntries(['owner', 'repo', 'branch', 'token'].map(key => [key, $('#settings-form').elements[key].value.trim()])); }
@@ -501,18 +599,28 @@ $('#export-data').addEventListener('click', async e => {
   } catch (error) { handleError(error); }
   finally { e.target.disabled = false; }
 });
+$('#export-pre-v2').addEventListener('click', async () => {
+  try {
+    const raw = await store.getPreV2Backup();
+    if (raw === null) { notify('No pre-v2 backup on this device.'); return; }
+    const url = URL.createObjectURL(new Blob([raw], { type: 'application/json' }));
+    const link = document.createElement('a'); link.href = url; link.download = 'reading-pre-v2-state.json';
+    link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (error) { handleError(error); }
+});
 $('#import-data').addEventListener('change', async e => {
   const file = e.target.files[0]; if (!file) return;
   try { await store.importData(JSON.parse(await file.text())); notify('Backup merged and saved locally.'); }
   catch (error) { notify(`Import failed: ${error.message}`); }
   e.target.value = '';
 });
-function closeArticle() {
+function closeArticle(navigation = 'push') {
+  flushPosition();
   ++openVersion; active = null; articleReady = false; notes = emptyNotes(); bot = '';
-  reader.close(); reader.setArticle('', []); pane.setArticle(null);
+  reader.close(); reader.setArticle('', []); pane.setArticle(null); botBox.render('', {}); $('#reader-more').open = false;
   $('#article-header').replaceChildren(text('h1', 'Choose something to read.'));
   $('#reader-position').textContent = 'THE READING ROOM'; $('#reading-progress').textContent = '';
-  history.pushState(null, '', store?.demo ? '#demo' : location.pathname + location.search);
+  if (navigation === 'push') history.pushState(null, '', store?.demo ? '#demo' : location.pathname + location.search);
   renderLibrary(); updateReaderButtons();
   if (mobile()) showDrawer('library');
   else { document.body.classList.remove('sidebar-collapsed'); closeDrawers(); library.move(0); }
@@ -525,8 +633,9 @@ document.addEventListener('keydown', e => {
     if (document.querySelector('dialog[open]')) return;
     e.preventDefault();
     if (!$('#more-menu').hidden) { closeMore(true); return; }
-    const statusMenus = document.querySelectorAll('.item-status-menu[open]');
-    if (statusMenus.length) { statusMenus.forEach(menu => { menu.open = false; }); return; }
+    if ($('#reader-more').open) { $('#reader-more').open = false; return; }
+    const progressMenus = document.querySelectorAll('.item-progress-menu[open]');
+    if (progressMenus.length) { progressMenus.forEach(menu => { menu.open = false; }); return; }
     if (!$('#selection-actions').hidden) { reader.closeActions(); return; }
     if (document.body.matches('.library-open, .notes-open')) { closeDrawers(); return; }
     if (reader.active) { reader.close(); return; }
@@ -550,7 +659,10 @@ document.addEventListener('keydown', e => {
 });
 function restoreArticle() {
   if (access.blocked || !store) return;
-  if (!/^#(?:demo&)?article=/.test(location.hash)) return;
+  if (!/^#(?:demo&)?article=/.test(location.hash)) {
+    if (active && (!location.hash || /^#(?:demo)?$/.test(location.hash))) closeArticle('restore');
+    return;
+  }
   try {
     const slug = articleSlug();
     if (active?.slug !== slug) void openArticle(slug, 'restore');
@@ -558,8 +670,8 @@ function restoreArticle() {
 }
 window.addEventListener('popstate', restoreArticle);
 window.addEventListener('hashchange', restoreArticle);
-window.addEventListener('blur', () => { if (store) persist(store.flush()); });
-document.addEventListener('visibilitychange', () => { if (document.hidden && store) persist(store.flush()); });
+window.addEventListener('blur', () => { flushPosition(); if (store) persist(store.flush()); });
+document.addEventListener('visibilitychange', () => { if (document.hidden && store) { flushPosition(); persist(store.flush()); } });
 window.addEventListener('online', () => { if (store) persist(store.flush()); });
 closeDrawers(); void access.start();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { /* The app still works when service workers are disabled. */ });

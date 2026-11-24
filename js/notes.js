@@ -1,5 +1,3 @@
-import { renderMarkdown } from './markdown.js';
-
 const HIGHLIGHT_TYPE = 'application/x-reading-highlight';
 let nextPaneId = 0;
 
@@ -19,10 +17,11 @@ function highlightStart(highlight) {
 }
 
 export class NotesPane {
-  constructor({ root, onChange, onOpen, notify }) {
+  constructor({ root, onChange, onOpen, onJump, notify }) {
     this.root = root;
     this.onChange = onChange;
     this.onOpen = onOpen;
+    this.onJump = onJump;
     this.notify = notify;
     this.articleId = null;
     this.dragDepth = 0;
@@ -47,27 +46,19 @@ export class NotesPane {
     editorSection.append(heading, this.textarea, hint, this.dropStatus);
     const divider = element('hr', 'notes-divider');
     const marginSection = element('section', 'margin-notes-section');
-    const marginHeading = element('h2', 'notes-section-heading', 'Margin notes');
+    const marginHeading = element('h2', 'notes-section-heading', 'Highlights');
     marginHeading.id = `${id}-margins`;
     marginSection.setAttribute('aria-labelledby', marginHeading.id);
-    marginSection.append(marginHeading, element('p', 'notes-section-hint', 'In reading order. Edit these notes in the reader.'));
+    marginSection.append(marginHeading, element('p', 'notes-section-hint', 'In reading order. Select a quote to return to it.'));
     this.margins = element('div', 'margin-notes-list');
     marginSection.append(this.margins);
-    const botSection = element('section', 'bot-summary-section');
-    const botHeading = element('h2', 'notes-section-heading', 'Summary');
-    this.botHeading = botHeading;
-    botHeading.id = `${id}-bot`;
-    botSection.setAttribute('aria-labelledby', botHeading.id);
-    this.bot = element('div', 'bot-summary bot-content markdown');
-    botSection.append(botHeading, this.bot);
-    const connectionsSection = element('section', 'connections-section');
-    const connectionsHeading = element('h2', 'notes-section-heading', 'Connections');
-    this.connectionsHeading = connectionsHeading;
-    connectionsHeading.id = `${id}-connections`;
-    connectionsSection.setAttribute('aria-labelledby', connectionsHeading.id);
-    this.connections = element('div', 'bot-connections bot-content markdown');
-    connectionsSection.append(connectionsHeading, this.connections);
-    root.replaceChildren(editorSection, divider, marginSection, botSection, connectionsSection);
+    const linksSection = element('section', 'kept-links-section');
+    const linksHeading = element('h2', 'notes-section-heading', 'Kept links');
+    linksHeading.id = `${id}-links`;
+    linksSection.setAttribute('aria-labelledby', linksHeading.id);
+    this.links = element('div', 'kept-links-list');
+    linksSection.append(linksHeading, this.links);
+    root.replaceChildren(editorSection, divider, marginSection, linksSection);
 
     this.textarea.addEventListener('input', () => { this.autogrow(); this.onChange?.(this.textarea.value); });
     let previousWidth = 0;
@@ -121,7 +112,7 @@ export class NotesPane {
     });
     document.addEventListener('dragend', () => this.clearDrag());
     this.updateMargins([]);
-    this.renderBot('');
+    this.updateLinks([]);
   }
 
   accepts(event) {
@@ -142,7 +133,7 @@ export class NotesPane {
     pane.scrollTop = scrollTop;
   }
 
-  setArticle(item, notes = {}, botMarkdown = '') {
+  setArticle(item, notes = {}) {
     this.articleId = item ? String(item.id ?? item.slug) : null;
     this.textarea.disabled = !item;
     const value = String(notes?.long_notes ?? '');
@@ -151,11 +142,11 @@ export class NotesPane {
     this.textarea.setAttribute('aria-label', item ? `Long notes for ${item.title || 'this article'}` : 'Long notes');
     this.clearDrag();
     this.updateMargins(notes?.highlights || []);
-    this.renderBot(botMarkdown);
+    this.updateLinks(notes?.links || []);
   }
 
   updateMargins(highlights = []) {
-    const notes = highlights.filter(highlight => !highlight.deleted && String(highlight.note || '').trim()).map((highlight, index) => ({ highlight, index }));
+    const notes = highlights.filter(highlight => !highlight.deleted).map((highlight, index) => ({ highlight, index }));
     notes.sort((a, b) => {
       const paragraphA = position(a.highlight.para ?? a.highlight.anchor?.para);
       const paragraphB = position(b.highlight.para ?? b.highlight.anchor?.para);
@@ -165,51 +156,44 @@ export class NotesPane {
       return startA !== startB ? (startA < startB ? -1 : 1) : a.index - b.index;
     });
     const fragment = document.createDocumentFragment();
-    if (!notes.length) fragment.append(element('p', 'empty-state margin-notes-empty', 'Your interlinear notes will appear here as you write.'));
+    if (!notes.length) fragment.append(element('p', 'empty-state margin-notes-empty', 'Your highlights and interlinear notes will appear here.'));
     for (const { highlight } of notes) {
       const entry = element('article', 'margin-note');
       entry.dataset.highlightId = String(highlight.id || '');
       const quote = element('blockquote', 'margin-note-quote');
-      quote.append(element('p', '', String(highlight.quote || '')));
-      const note = element('p', 'margin-note-text', String(highlight.note));
+      const jump = element('button', 'margin-quote-jump', String(highlight.quote || ''));
+      jump.type = 'button';
+      jump.disabled = !highlight.id;
+      jump.addEventListener('click', () => this.onJump?.(highlight.id));
+      quote.append(jump);
+      const note = String(highlight.note || '').trim() ? element('p', 'margin-note-text', String(highlight.note)) : null;
       const send = element('button', 'margin-send-button', 'Send quote to long notes');
       send.type = 'button';
       send.disabled = this.articleId === null || !String(highlight.quote || '').trim();
       send.addEventListener('click', () => this.appendQuote(highlight.quote));
-      entry.append(quote, note, send);
+      entry.append(quote);
+      if (note) entry.append(note);
+      entry.append(send);
       fragment.append(entry);
     }
     this.margins.replaceChildren(fragment);
   }
 
-  renderBot(markdown) {
-    let text = String(markdown || '');
-    const metadata = {};
-    const header = text.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
-    if (header) {
-      for (const line of header[1].split(/\r?\n/)) {
-        const field = line.match(/^(summary_by|connections_by):\s*(.*?)\s*$/);
-        if (field) metadata[field[1]] = field[2].replace(/^(['"])(.*)\1$/, '$2');
-      }
-      text = text.slice(header[0].length);
+  updateLinks(links = []) {
+    const fragment = document.createDocumentFragment();
+    const seen = new Set();
+    for (const link of links) {
+      if (!link || typeof link.slug !== 'string' || !/^[a-z\d][a-z\d_-]*$/i.test(link.slug) || seen.has(link.slug)) continue;
+      seen.add(link.slug);
+      const row = element('p', 'kept-link');
+      const anchor = element('a', '', link.title || link.slug);
+      anchor.href = `#article=${encodeURIComponent(link.slug)}`;
+      anchor.dataset.article = link.slug;
+      row.append(anchor);
+      fragment.append(row);
     }
-    this.botHeading.textContent = metadata.summary_by ? `Summary · ${metadata.summary_by}` : 'Summary';
-    this.connectionsHeading.textContent = metadata.connections_by ? `Connections · ${metadata.connections_by}` : 'Connections';
-    const lines = text.split(/\r?\n/);
-    let fence = null;
-    let connectionsAt = -1;
-    for (let index = 0; index < lines.length; index++) {
-      const marker = lines[index].match(/^ {0,3}(`{3,}|~{3,})/);
-      if (marker) {
-        if (!fence) fence = marker[1];
-        else if (marker[1][0] === fence[0] && marker[1].length >= fence.length) fence = null;
-      }
-      if (!fence && /^ {0,3}#{1,6}\s+Connections\s*#*\s*$/i.test(lines[index])) { connectionsAt = index; break; }
-    }
-    const summary = connectionsAt < 0 ? text : lines.slice(0, connectionsAt).join('\n');
-    const connections = connectionsAt < 0 ? '' : lines.slice(connectionsAt + 1).join('\n');
-    this.bot.innerHTML = summary.trim() ? renderMarkdown(summary) : '<p class="empty-state">No summary yet.</p>';
-    this.connections.innerHTML = connections.trim() ? renderMarkdown(connections) : '<p class="empty-state">No suggested connections yet.</p>';
+    if (!seen.size) fragment.append(element('p', 'empty-state', 'Links you keep will appear here.'));
+    this.links.replaceChildren(fragment);
   }
 
   focus() {

@@ -1,5 +1,7 @@
-const STATUSES = ['unread', 'read', 'commented'];
-const LABELS = { unread: 'Unread', read: 'Read', commented: 'Commented' };
+import { libraryFields } from './model.js';
+
+const PROGRESS = ['new', 'reading', 'finished', 'let_go'];
+const LABELS = { new: 'New', reading: 'Reading', finished: 'Finished', let_go: 'Let go', 'with-notes': 'With notes' };
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -12,12 +14,11 @@ function lookup(collection, key) {
   return collection instanceof Map ? collection.get(key) : collection?.[key];
 }
 
-function noteLength(item, meta) {
-  const recorded = lookup(meta?.notes_summary_len, item.slug) ?? lookup(meta?.notes_summary_len, item.id);
-  if (typeof recorded === 'number' && Number.isFinite(recorded) && recorded >= 0) return recorded;
-  if (typeof item.notes_summary === 'string') return item.notes_summary.length;
-  const notes = item.notes || item;
-  return String(notes.long_notes || '').length + (notes.highlights || []).reduce((sum, highlight) => sum + (highlight.deleted ? 0 : String(highlight.note || '').length), 0);
+function noteCount(item) {
+  const notes = item.notes || {};
+  return Number(Boolean(String(notes.long_notes || '').trim())) + (notes.highlights || []).reduce((count, highlight) => (
+    count + Number(!highlight.deleted && !notes.deleted_highlights?.[highlight.id] && Boolean(String(highlight.note || '').trim()))
+  ), 0);
 }
 
 function timestamp(value) {
@@ -26,13 +27,13 @@ function timestamp(value) {
 }
 
 export class Library {
-  constructor({ root, onOpen, onStar, onStatus, onTag }) {
+  constructor({ root, onOpen, onStar, onProgress, onTag }) {
     this.root = root;
     this.onOpen = onOpen;
     this.onStar = onStar;
-    this.onStatus = onStatus;
+    this.onProgress = onProgress;
     this.onTag = onTag;
-    this.openGroups = new Set(STATUSES);
+    this.openGroups = new Set([...PROGRESS, 'with-notes']);
     this.focusedId = null;
     this.groups = [];
     this.densityToggle = root.ownerDocument.getElementById('library-density');
@@ -50,6 +51,7 @@ export class Library {
       switch (control.dataset.action) {
         case 'open':
           this.focusedId = id;
+          this.updateCursor();
           this.onOpen?.(id);
           break;
         case 'star':
@@ -58,9 +60,9 @@ export class Library {
         case 'tag':
           this.onTag?.(control.dataset.tag);
           break;
-        case 'status':
+        case 'progress':
           control.closest('details').open = false;
-          this.onStatus?.(id, control.dataset.status);
+          this.onProgress?.(id, control.dataset.progress);
           break;
       }
     });
@@ -77,42 +79,48 @@ export class Library {
     }
   }
 
-  render(items, { activeId, query = '', tag = '', starredOnly = false, bodies = {}, meta = {} } = {}) {
+  render(items, { activeId, query = '', tag = '', starredOnly = false, progress = '', withNotes = false, shortOnly = false, source = '', bodies = {} } = {}) {
     const term = String(query).trim().toLocaleLowerCase();
-    const grouped = Object.fromEntries(STATUSES.map(status => [status, []]));
-    for (const item of items) {
+    const groupKeys = withNotes ? ['with-notes'] : PROGRESS;
+    const grouped = Object.fromEntries(groupKeys.map(key => [key, []]));
+    for (const original of items) {
+      const item = libraryFields(original);
+      const current = PROGRESS.includes(item.progress) ? item.progress : 'new';
       if (starredOnly && !item.starred) continue;
+      if (progress && current !== progress) continue;
+      if (withNotes && !noteCount(item)) continue;
+      if (shortOnly && item.read_minutes > 10) continue;
+      if (source && item.source_label !== source) continue;
       if (tag && !(item.tags || []).includes(tag)) continue;
       if (term) {
         const body = lookup(bodies, item.slug) ?? lookup(bodies, item.id) ?? '';
         const searchable = [item.title, item.author, item.handle, ...(item.tags || []), body].join('\n').toLocaleLowerCase();
         if (!searchable.includes(term)) continue;
       }
-      const status = STATUSES.includes(item.status) ? item.status : 'unread';
-      grouped[status].push(item);
+      grouped[withNotes ? 'with-notes' : current].push(item);
     }
     const fragment = document.createDocumentFragment();
     this.groups = [];
     let total = 0;
-    for (const status of STATUSES) {
-      const rows = grouped[status];
-      rows.sort(status === 'commented'
-        ? (a, b) => noteLength(b, meta) - noteLength(a, meta)
-        : (a, b) => timestamp(b.status_changed_at) - timestamp(a.status_changed_at));
+    for (const key of groupKeys) {
+      const rows = grouped[key];
+      rows.sort(withNotes
+        ? (a, b) => timestamp(b.notes?.updated_at) - timestamp(a.notes?.updated_at) || timestamp(b.added_at) - timestamp(a.added_at)
+        : (a, b) => timestamp(b.added_at) - timestamp(a.added_at));
       total += rows.length;
       const group = element('details', 'library-group');
-      group.dataset.status = status;
-      group.open = this.openGroups.has(status);
+      group.dataset.progress = key;
+      group.open = this.openGroups.has(key);
       const summary = element('summary', 'library-group-heading');
-      summary.append(element('span', '', LABELS[status]), element('span', 'library-count', String(rows.length)));
-      summary.setAttribute('aria-label', `${LABELS[status]}, ${rows.length} ${rows.length === 1 ? 'article' : 'articles'}`);
+      summary.append(element('span', '', LABELS[key]), element('span', 'library-count', String(rows.length)));
+      summary.setAttribute('aria-label', `${LABELS[key]}, ${rows.length} ${rows.length === 1 ? 'article' : 'articles'}`);
       group.append(summary);
       const list = element('ul', 'library-items');
-      for (const item of rows) list.append(this.createRow(item, activeId, status));
+      for (const item of rows) list.append(this.createRow(item, activeId));
       group.append(list);
       group.addEventListener('toggle', () => {
-        if (group.open) this.openGroups.add(status);
-        else this.openGroups.delete(status);
+        if (group.open) this.openGroups.add(key);
+        else this.openGroups.delete(key);
       });
       fragment.append(group);
       this.groups.push({ node: group, ids: rows.map(item => String(item.id)) });
@@ -124,7 +132,8 @@ export class Library {
     this.updateCursor();
   }
 
-  createRow(item, activeId, status) {
+  createRow(item, activeId) {
+    const progress = PROGRESS.includes(item.progress) ? item.progress : 'new';
     const row = element('li', 'library-item');
     row.dataset.libraryId = String(item.id);
     row.classList.toggle('is-active', String(item.id) === String(activeId));
@@ -134,7 +143,8 @@ export class Library {
     star.dataset.action = 'star';
     star.classList.toggle('is-starred', Boolean(item.starred));
     star.setAttribute('aria-pressed', String(Boolean(item.starred)));
-    star.setAttribute('aria-label', `${item.starred ? 'Unstar' : 'Star'} ${item.title || 'Untitled article'}`);
+    star.setAttribute('aria-label', `${item.starred ? 'Remove keeper' : 'Keep as worth coming back to'}: ${item.title || 'Untitled article'}`);
+    star.title = item.starred ? 'Keeper — worth coming back to' : 'Worth coming back to';
     const title = element('button', 'library-title', item.title || 'Untitled article');
     title.type = 'button';
     title.dataset.action = 'open';
@@ -142,25 +152,25 @@ export class Library {
     title.title = item.title || 'Untitled article';
     if (String(item.id) === String(activeId)) title.setAttribute('aria-current', 'page');
     titleLine.append(star, title);
-    const menu = element('details', 'item-status-menu');
-    const menuToggle = element('summary', 'item-status-toggle', '⋯');
-    menuToggle.setAttribute('aria-label', `Change status for ${item.title || 'article'}; currently ${LABELS[status]}`);
+    const menu = element('details', 'item-progress-menu');
+    const menuToggle = element('summary', 'item-progress-toggle', '⋯');
+    menuToggle.setAttribute('aria-label', `Change progress for ${item.title || 'article'}; currently ${LABELS[progress]}`);
     menu.append(menuToggle);
-    const choices = element('div', 'item-status-options');
-    for (const nextStatus of STATUSES) {
-      const button = element('button', '', LABELS[nextStatus]);
+    const choices = element('div', 'item-progress-options');
+    for (const nextProgress of PROGRESS) {
+      const button = element('button', '', LABELS[nextProgress]);
       button.type = 'button';
-      button.dataset.action = 'status';
-      button.dataset.status = nextStatus;
-      button.setAttribute('aria-pressed', String(status === nextStatus));
+      button.dataset.action = 'progress';
+      button.dataset.progress = nextProgress;
+      button.setAttribute('aria-pressed', String(progress === nextProgress));
       choices.append(button);
     }
     menu.append(choices);
     titleLine.append(menu);
     row.append(titleLine);
     const metadata = element('div', 'library-metadata');
-    (item.tags || []).slice(0, 3).forEach((tag, index) => {
-      const chip = element('button', `tag-chip${index === 0 ? ' tag-domain' : ''}`, tag);
+    (item.tags || []).slice(0, 1).forEach(tag => {
+      const chip = element('button', 'tag-chip tag-domain', tag);
       chip.type = 'button';
       chip.dataset.action = 'tag';
       chip.dataset.tag = tag;
@@ -168,21 +178,22 @@ export class Library {
       chip.setAttribute('aria-label', `Filter by tag ${tag}`);
       metadata.append(chip);
     });
-    const byline = element('span', 'library-byline');
-    const author = item.author || item.handle;
-    if (author) byline.append(document.createTextNode(String(author)));
-    if (item.created_at) {
-      const date = new Date(item.created_at);
-      if (Number.isFinite(date.getTime())) {
-        if (author) byline.append(document.createTextNode(' · '));
-        const time = element('time', '', date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }));
-        time.dateTime = date.toISOString();
-        byline.append(time);
-      }
+    metadata.append(element('span', 'library-source', item.source_label));
+    metadata.append(element('span', 'library-minutes', `${item.read_minutes} min`));
+    const count = noteCount(item);
+    if (count) {
+      const badge = element('span', 'library-notes', `✎ ${count}`);
+      badge.setAttribute('aria-label', `${count} ${count === 1 ? 'note' : 'notes'}`);
+      metadata.append(badge);
     }
-    byline.title = byline.textContent;
-    metadata.append(byline);
     row.append(metadata);
+    if (progress === 'reading') {
+      const bar = element('progress', 'library-progress');
+      bar.max = 1;
+      bar.value = Math.max(0, Math.min(1, Number(item.position) || 0));
+      bar.setAttribute('aria-label', `Reading position for ${item.title || 'Untitled article'}`);
+      row.append(bar);
+    }
     return row;
   }
 

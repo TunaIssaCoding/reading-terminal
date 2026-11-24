@@ -302,6 +302,7 @@ export class Reader {
     const placed = this.anchors.filter(a => a.start !== undefined).sort((a, b) => a.start - b.start);
     for (const anchor of placed) {
       const { h, start } = anchor;
+      if (!h.note?.trim() && this.active !== h.id) continue;
       let lineIndex = this.lines.findIndex(line => start >= line.start && start < line.end);
       if (lineIndex < 0) continue;
       let offset = 0; let first = true;

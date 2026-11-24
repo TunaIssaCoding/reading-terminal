@@ -109,21 +109,42 @@
       <div class="library-tools">
         <div class="section-eyebrow">YOUR LIBRARY <span id="library-total">0 items</span></div>
         <label class="search-box"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="Search your reading…" aria-label="Search title, tags, author and body"><kbd>/</kbd></label>
-        <div class="filter-row"><button id="star-filter" aria-pressed="false">☆ Starred only</button><button id="tag-filter" hidden></button></div>
+        <div class="filter-row">
+          <label>Progress <select id="progress-filter"><option value="">All progress</option><option value="new">New</option><option value="reading">Reading</option><option value="finished">Finished</option><option value="let_go">Let go</option></select></label>
+          <button id="star-filter" aria-pressed="false" title="Worth coming back to">★ Keepers</button>
+          <button id="notes-filter" aria-pressed="false">✎ With notes · most recent</button>
+          <button id="short-filter" aria-pressed="false">≤ 10 min</button>
+          <label>Source <select id="source-filter"><option value="">All sources</option></select></label>
+          <button id="tag-filter" hidden></button>
+        </div>
         <span id="search-status" role="status"></span>
       </div>
       <nav id="library" aria-label="Articles" data-density="compact"></nav>
       <footer class="sidebar-footer"><span>A little attention, every day.</span><span><kbd>j</kbd> <kbd>k</kbd> navigate · <kbd>↵</kbd> open</span></footer>
     </aside>
     <main id="reader-pane" tabindex="-1" aria-label="Article reader">
-      <div class="reader-toolbar"><span id="reader-position">THE READING ROOM</span><div><button id="reader-star" aria-label="Star current article" aria-pressed="false">☆</button><button id="read-toggle">Mark read <kbd>r</kbd></button></div></div>
+      <div class="reader-toolbar">
+        <span id="reader-position">THE READING ROOM</span>
+        <div class="reader-actions">
+          <span id="progress-chip" hidden></span>
+          <button id="read-toggle" disabled>Mark finished · r</button>
+          <button id="reader-star" aria-label="Add Keeper — worth coming back to" title="Worth coming back to" aria-pressed="false" disabled>★ Keeper · s</button>
+          <details id="reader-more" hidden><summary aria-label="Article options">⋯</summary><div class="reader-menu">
+            <button id="let-go">Let go</button>
+            <button id="up-next" disabled title="Up next arrives in a later update">Add to Up next</button>
+            <a id="open-pdf" target="_blank" rel="noopener noreferrer" hidden>Open PDF</a>
+            <a id="open-source" target="_blank" rel="noopener noreferrer" hidden>Open source</a>
+          </div></details>
+        </div>
+      </div>
       <div id="article-header"></div>
       <div id="article-body" class="article-body"></div>
       <div id="anchor-warnings" role="status"></div>
+      <section id="bot-box" hidden></section>
       <footer class="reader-footer"><span>SELECT A PASSAGE, THEN <kbd>h</kbd> TO THINK IN THE MARGINS</span><span id="reading-progress">0%</span></footer>
     </main>
     <div id="notes-resizer" role="separator" aria-label="Resize notes pane" aria-orientation="vertical" tabindex="0" aria-valuemin="22" aria-valuemax="50" aria-valuenow="30"></div>
-    <aside id="notes-pane" aria-label="Article notes"><div class="notes-topline"><span>Notes</span><span>PRIVATE NOTES <button id="notes-close" aria-label="Close notes drawer">×</button></span></div><div id="notes-content"></div></aside>
+    <aside id="notes-pane" aria-label="Your notes"><div class="notes-topline"><span>Your notes</span><span>PRIVATE NOTES <button id="notes-close" aria-label="Close notes drawer">×</button></span></div><div id="notes-content"></div></aside>
   </div>
   <button id="drawer-backdrop" aria-label="Close drawer" hidden></button>
   <div id="selection-actions" class="selection-actions" role="toolbar" aria-label="Selection actions" hidden><button id="highlight-selection">Highlight <kbd>h</kbd></button><button id="send-selection">Send to notes</button><button id="copy-selection">Copy</button></div>
@@ -157,7 +178,7 @@
     <section id="backup-section">
       <h3>Backup</h3>
       <p>Export all user state and notes as JSON. Import merges with this library's existing notes; it never deletes them. Backups contain private text—store them securely.</p>
-      <div class="dialog-actions"><button id="export-data" type="button">Export backup</button><label class="button-label">Import backup<input id="import-data" type="file" accept="application/json,.json" hidden></label></div>
+      <div class="dialog-actions"><button id="export-data" type="button">Export backup</button><button id="export-pre-v2" type="button" hidden>Export pre-v2 backup</button><label class="button-label">Import backup<input id="import-data" type="file" accept="application/json,.json" hidden></label></div>
     </section>
     <section id="connection-section">
       <h3>Connection</h3>
@@ -176,6 +197,6 @@
       </form>
     </details>
   </dialog>
-  <dialog id="help-dialog" aria-labelledby="help-title"><header class="dialog-header"><div><span class="section-eyebrow">LESS REACHING, MORE READING</span><h2 id="help-title">Keyboard shortcuts</h2></div><button data-close aria-label="Close shortcuts">×</button></header><dl class="shortcut-list"><dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>Next / previous library item</dd><dt><kbd>Enter</kbd></dt><dd>Open the focused item</dd><dt><kbd>r</kbd></dt><dd>Toggle read</dd><dt><kbd>s</kbd></dt><dd>Toggle star</dd><dt><kbd>h</kbd></dt><dd>Highlight selected source text</dd><dt><kbd>n</kbd></dt><dd>Focus Notes</dd><dt><kbd>/</kbd></dt><dd>Search the library</dd><dt><kbd>Esc</kbd></dt><dd>Close an overlay, menu or reader</dd><dt><kbd>?</kbd></dt><dd>Open this guide</dd></dl><p>Reading shortcuts stay out of your way in inputs, editors and the lock screen. The interlinear editor keeps its own Esc to finish editing. Select text for Highlight, Send to notes and Copy, or drag a highlighted passage to Notes. Right-click always uses the browser menu.</p></dialog>
+  <dialog id="help-dialog" aria-labelledby="help-title"><header class="dialog-header"><div><span class="section-eyebrow">LESS REACHING, MORE READING</span><h2 id="help-title">Keyboard shortcuts</h2></div><button data-close aria-label="Close shortcuts">×</button></header><dl class="shortcut-list"><dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>Next / previous library item</dd><dt><kbd>Enter</kbd></dt><dd>Open the focused item</dd><dt><kbd>r</kbd></dt><dd>Toggle Finished / Reading</dd><dt><kbd>s</kbd></dt><dd>Toggle Keeper</dd><dt><kbd>h</kbd></dt><dd>Highlight selected source text</dd><dt><kbd>n</kbd></dt><dd>Focus Your notes</dd><dt><kbd>/</kbd></dt><dd>Search the library</dd><dt><kbd>Esc</kbd></dt><dd>Close an overlay, menu or reader</dd><dt><kbd>?</kbd></dt><dd>Open this guide</dd></dl><p>Shortcuts stay quiet while you are typing. Notes and highlights are saved locally first, then synced to your private repository.</p></dialog>
 </body>
 </html>

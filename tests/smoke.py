@@ -100,8 +100,13 @@ class Repository:
             self.set(f"bot/summaries/{slug}.md", "## Observations\nA fictional bot summary.\n\n## Connections\n"
                      "- [Another notebook](article:essay-03)")
         self.set("library.json", self.items)
-        self.set("user/state.json", {})
-        self.set("bot/meta.json", {"notes_summary_len": {"essay-22": 50, "essay-23": 900, "essay-24": 300}})
+        self.set("user/state.json", {
+            item["slug"]: {"progress": "new" if n <= 16 else "finished", "starred": False,
+                           "position": 0, "triaged_at": None if n <= 16 else STAMP,
+                           "progress_changed_at": STAMP, "last_opened_at": None}
+            for n, item in enumerate(self.items, 1)})
+        self.set("user/queue.json", {"queue": [], "arrivals_since": STAMP})
+        self.set("bot/meta.json", {})
         self.files["assets/pdf/essay-01.pdf"] = pdf_bytes()
         self.files["assets/images/fallback.png"] = PNG
         self.files["assets/images/inline.png"] = PNG
@@ -147,7 +152,7 @@ class Repository:
         if request.method == "PUT":
             if self.fail_writes:
                 return route.fulfill(status=503, json={"message": "Fictional offline write"})
-            if not self.private or not re.fullmatch(r"user/(state\.json|notes/[^/]+\.json)", path):
+            if not self.private or not re.fullmatch(r"user/(state\.json|queue\.json|notes/[^/]+\.json)", path):
                 self.violations.append("Unsafe PUT: " + path)
                 return route.fulfill(status=403, json={"message": "Unsafe write"})
             data = request.post_data_json
@@ -204,7 +209,8 @@ class Repository:
 
 
 @contextmanager
-def session(browser, base, repo=None, mobile=False, store_only=False, demo=False, vault=False, clock=False):
+def session(browser, base, repo=None, mobile=False, store_only=False, demo=False, vault=False, clock=False,
+            open_reader=True):
     repo = repo or Repository()
     context = browser.new_context(viewport={"width": 390 if mobile else 1440, "height": 844 if mobile else 900},
                                   service_workers="block", reduced_motion="reduce", has_touch=mobile)
@@ -245,11 +251,19 @@ def session(browser, base, repo=None, mobile=False, store_only=False, demo=False
         page.clock.install()
     page.route("https://api.github.com/**", repo.route)
     page.set_default_timeout(12000)
-    page.goto(base + ("/__smoke_store__.html" if store_only else "/#demo" if demo else
-                      "/#article=essay-01" if not vault else "/"))
+    page.goto(base + ("/__smoke_store__.html" if store_only else "/#demo" if demo else "/"))
     if not store_only and not vault:
-        page.wait_for_selector(".source-line")
-        expect(page.locator(NOTES)).to_be_enabled()
+        expect(page.locator(".library-item").first).to_be_attached()
+        expect(page.locator(".source-line")).to_have_count(0)
+        expect(page.locator(NOTES)).to_be_disabled()
+        assert "#article=" not in page.url, "Default Library load opened an article"
+        if open_reader:
+            if mobile and not page.locator(".library-title").first.is_visible():
+                page.locator("#library-toggle").click()
+            slug = page.locator(".library-item").first.get_attribute("data-library-id") if demo else "essay-01"
+            page.locator(f'[data-library-id="{slug}"] .library-title').click()
+            page.wait_for_selector(".source-line")
+            expect(page.locator(NOTES)).to_be_enabled()
         page.evaluate("document.fonts.ready")
     try:
         yield page, repo, errors
@@ -273,14 +287,30 @@ def open_item(page, slug):
 
 
 def status(page, slug, value):
-    expect(page.locator(f'.library-group[data-status="{value}"] [data-library-id="{slug}"]')).to_have_count(1)
+    expect(page.locator(f'.library-group[data-progress="{value}"] [data-library-id="{slug}"]')).to_have_count(1)
 
 
 def set_status(page, slug, value):
     row = page.locator(f'[data-library-id="{slug}"]')
-    row.locator(".item-status-toggle").click()
-    row.locator(f'button[data-action="status"][data-status="{value}"]').click()
+    row.locator(".item-progress-toggle").click()
+    row.locator(f'button[data-action="progress"][data-progress="{value}"]').click()
     status(page, slug, value)
+
+
+def scroll_article(page, fraction):
+    page.evaluate("""fraction => {
+      const pane=document.querySelector('#reader-pane'), body=document.querySelector('#article-body');
+      const start=body.getBoundingClientRect().top-pane.getBoundingClientRect().top+pane.scrollTop;
+      pane.scrollTop=start+body.offsetHeight*fraction-pane.clientHeight;
+      pane.dispatchEvent(new Event('scroll'));
+    }""", fraction)
+
+
+def adjacent_slug(page, direction):
+    return page.locator(".library-item").evaluate_all("""(rows, direction) => {
+      const current=rows.findIndex(row=>row.classList.contains('is-focused'));
+      return rows[Math.max(0,Math.min(rows.length-1,current+direction))].dataset.libraryId;
+    }""", direction)
 
 
 def menu_action(page, selector, view=False):
@@ -312,15 +342,12 @@ def synced(page):
 def navigation_media_layout(browser, base):
     with session(browser, base) as (page, repo, _):
         opened(page, "essay-01")
-        page.wait_for_timeout(2500)  # A negative assertion must exceed the 2s sync debounce.
-        assert repo.puts == [], "Initial open must not create a repository commit"
-        expect(page.locator("#article-header h1")).to_have_css("font-style", "italic")
-        expect(page.locator('[data-library-id="essay-01"] .library-title')).to_have_css("font-style", "italic")
-        for group, expected in [("unread", [f"essay-{n:02}" for n in range(1, 17)]),
-                                ("read", [f"essay-{n:02}" for n in range(17, 22)]),
-                                ("commented", ["essay-23", "essay-24", "essay-22"])]:
-            actual = page.locator(f'.library-group[data-status="{group}"] .library-item').evaluate_all("rows => rows.map(r => r.dataset.libraryId)")
-            assert actual == expected, (group, actual)
+        synced(page)
+        state = repo.document("user/state.json")["essay-01"]
+        assert state["progress"] == "reading" and state["last_opened_at"]
+        status(page, "essay-01", "reading")
+        status(page, "essay-02", "new")
+        status(page, "essay-17", "finished")
         metrics = page.locator("#library").evaluate("""root => {
             const box = root.getBoundingClientRect();
             const rows = [...root.querySelectorAll('.library-item')];
@@ -347,7 +374,8 @@ def navigation_media_layout(browser, base):
         expect(image).to_have_attribute("src", re.compile(r"^blob:"))
         image.evaluate("img => img.decode()")
         assert image.evaluate("img => img.naturalWidth") == 1
-        pdf = page.locator("#article-header").get_by_role("link", name=re.compile("PDF"))
+        page.locator("#reader-more > summary").click()
+        pdf = page.locator("#open-pdf")
         expect(pdf).to_have_attribute("href", re.compile(r"^blob:"))
         with page.context.expect_page() as pending:
             pdf.click()
@@ -364,12 +392,13 @@ def navigation_media_layout(browser, base):
             expect(image).to_have_attribute("src", re.compile(r"^blob:"))
             image.evaluate("img => img.decode()")
         expect(page.locator(".article-images img")).to_have_count(0)
+        page.locator("#reader-more > summary").click()
         with page.context.expect_page() as pending:
-            page.locator("#article-header").get_by_role("link", name=re.compile("PDF")).click()
+            page.locator("#open-pdf").click()
         external = pending.value
         external.wait_for_url("https://fiction.example/external.pdf")
         external.close()
-        page.locator('.connections-section a[data-article="essay-03"]').click()
+        open_item(page, "essay-03")
         opened(page, "essay-03")
         page.go_back()
         opened(page, "essay-02")
@@ -382,13 +411,16 @@ def navigation_media_layout(browser, base):
         opened(page, "essay-01")
         page.go_back()
         opened(page, "essay-03")
-        page.wait_for_timeout(2500)
-        assert repo.puts == [], "Open/history/density/media operations must not sync user state"
+        synced(page)
+        assert {path for path, _, _ in repo.puts} == {"user/state.json"}
+        for slug in ("essay-01", "essay-02", "essay-03"):
+            state = repo.document("user/state.json")[slug]
+            assert state["progress"] == "reading" and state["last_opened_at"]
 
 
 def indexed_search(browser, base):
     for mode in ("full", "absent", "malformed", "partial"):
-        with session(browser, base, Repository(index=mode)) as (page, repo, _):
+        with session(browser, base, Repository(index=mode), open_reader=False) as (page, repo, _):
             before = len(repo.article_gets())
             page.locator("#search").fill("zephyrquartz")
             expect(page.locator(".library-title")).to_have_text(["Fictional field notebook 14"], timeout=20000)
@@ -408,8 +440,10 @@ def indexed_search(browser, base):
 
 def debounce_status_and_growth(browser, base):
     with session(browser, base) as (page, repo, _):
+        synced(page)
+        repo.puts.clear()
         page.locator(NOTES).fill("First fictional thought")
-        status(page, "essay-01", "commented")
+        status(page, "essay-01", "reading")
         page.wait_for_timeout(650)
         assert not repo.puts, "Notes synced before debounce"
         page.locator(NOTES).fill("Second fictional thought")
@@ -429,32 +463,31 @@ def debounce_status_and_growth(browser, base):
         page.reload()
         opened(page, "essay-01")
         expect(page.locator(NOTES)).to_have_value("Second fictional thought")
-        status(page, "essay-01", "commented")
+        status(page, "essay-01", "reading")
         page.locator(NOTES).fill("")
-        status(page, "essay-01", "unread")
+        status(page, "essay-01", "reading")
         synced(page)
         open_item(page, "essay-17")
-        page.locator(NOTES).fill("An annotation on an already read article")
-        status(page, "essay-17", "commented")
+        page.locator(NOTES).fill("An annotation on an already finished article")
+        status(page, "essay-17", "finished")
         synced(page)
         page.reload()
         opened(page, "essay-17")
         page.locator(NOTES).fill("  \n ")
-        status(page, "essay-17", "read")
-        # An explicit Commented choice must sever an earlier automatic promotion.
+        status(page, "essay-17", "finished")
         open_item(page, "essay-04")
         page.locator(NOTES).fill("Temporary thought")
-        status(page, "essay-04", "commented")
-        set_status(page, "essay-04", "commented")
+        status(page, "essay-04", "reading")
+        set_status(page, "essay-04", "finished")
         synced(page)
         page.reload()
         opened(page, "essay-04")
         page.locator(NOTES).fill("")
-        status(page, "essay-04", "commented")
+        status(page, "essay-04", "finished")
         open_item(page, "essay-22")
-        page.locator(NOTES).fill("Temporary thought on a manually commented fixture")
+        page.locator(NOTES).fill("Temporary thought on a finished fixture")
         page.locator(NOTES).fill("")
-        status(page, "essay-22", "commented")
+        status(page, "essay-22", "finished")
         small = page.locator(NOTES).bounding_box()["height"]
         page.locator(NOTES).fill("\n".join(f"Fictional note line {n}: an observation." for n in range(70)))
         page.wait_for_function("() => document.querySelector('.long-notes-editor').getBoundingClientRect().height > 1200")
@@ -496,7 +529,7 @@ def highlight_drag_and_persistence(browser, base):
     with session(browser, base) as (page, repo, errors):
         open_item(page, "essay-05")
         highlight_id = make_highlight(page)
-        status(page, "essay-05", "commented")
+        status(page, "essay-05", "reading")
         quote = page.locator(".margin-note-quote").first.inner_text()
         page.locator(NOTES).fill("A pre-existing fictional note")
         synced(page)
@@ -575,19 +608,28 @@ def highlight_drag_and_persistence(browser, base):
         expect(page.locator(NOTES)).to_have_value(saved["long_notes"])
         expect(page.locator(".margin-note-text")).to_contain_text("More fictional detail")
         assert page.locator(f'mark[data-highlight="{highlight_id}"]').count() >= 1
-        # All note types participate in automatic Commented; an empty highlight alone does not.
+        scroll_article(page, .65)
+        page.locator(".margin-quote-jump").first.click()
+        page.wait_for_function("""() => {
+          const pane=document.querySelector('#reader-pane').getBoundingClientRect();
+          const editor=document.querySelector('.interlinear-editor');
+          if (!editor) return false;
+          const box=editor.getBoundingClientRect();
+          return box.top>=pane.top && box.top<pane.bottom && box.bottom>pane.top;
+        }""")
+        # Adding and removing annotations never changes reading progress.
         page.locator(NOTES).fill("")
-        status(page, "essay-05", "commented")
+        status(page, "essay-05", "reading")
         page.locator(f'mark[data-highlight="{highlight_id}"]').first.click()
         page.locator('button[data-note-action="delete"]').first.click()
-        status(page, "essay-05", "unread")
+        status(page, "essay-05", "reading")
         expect(page.locator("mark[data-highlight]")).to_have_count(0)
         make_highlight(page, note="x")
         page.locator("mark[data-highlight]").first.click()
         page.keyboard.press("Control+A")
         page.keyboard.press("Backspace")
         page.keyboard.press("Backspace")
-        status(page, "essay-05", "unread")
+        status(page, "essay-05", "reading")
         assert page.locator("mark[data-highlight]").count() >= 1, "Empty note removed the highlight"
         synced(page)
 
@@ -603,20 +645,23 @@ def keyboard_stars_and_read(browser, base):
         page.locator("#star-filter").click()
         open_item(page, "essay-01")  # Reset list focus after the one-item starred filter.
         page.locator("#reader-pane").focus()
+        next_slug = adjacent_slug(page, 1)
         page.keyboard.press("j")
-        expect(page.locator(".library-item.is-focused")).to_have_attribute("data-library-id", "essay-02")
+        expect(page.locator(".library-item.is-focused")).to_have_attribute("data-library-id", next_slug)
         page.keyboard.press("Enter")
-        opened(page, "essay-02")
+        opened(page, next_slug)
+        previous_slug = adjacent_slug(page, -1)
         page.keyboard.press("k")
         page.keyboard.press("Enter")
-        opened(page, "essay-01")
+        opened(page, previous_slug)
+        open_item(page, "essay-01")
         page.locator("#reader-pane").focus()
         page.keyboard.press("s")
         expect(page.locator("#reader-star")).to_have_attribute("aria-pressed", "true")
         page.keyboard.press("r")
-        status(page, "essay-01", "read")
+        status(page, "essay-01", "finished")
         page.keyboard.press("r")
-        status(page, "essay-01", "unread")
+        status(page, "essay-01", "reading")
         page.keyboard.press("n")
         expect(page.locator(NOTES)).to_be_focused()
         page.locator("#reader-pane").focus()
@@ -626,19 +671,14 @@ def keyboard_stars_and_read(browser, base):
         expect(page.locator("#search")).to_have_value("rjk")
         assert page.url.endswith("#article=essay-01")
         page.locator("#search").fill("")
-        status(page, "essay-01", "unread")
+        status(page, "essay-01", "reading")
         page.locator("#reader-pane").focus()
         page.keyboard.press("?")
         expect(page.locator("#help-dialog")).to_be_visible()
         page.keyboard.press("Escape")
         expect(page.locator("#help-dialog")).not_to_be_visible()
-        for progress, expected_status in [(0.85, "unread"), (0.92, "read")]:
-            page.evaluate("""fraction => {
-              const pane=document.querySelector('#reader-pane'), body=document.querySelector('#article-body');
-              const start=body.getBoundingClientRect().top-pane.getBoundingClientRect().top+pane.scrollTop;
-              pane.scrollTop=start+body.offsetHeight*fraction-pane.clientHeight;
-              pane.dispatchEvent(new Event('scroll'));
-            }""", progress)
+        for progress, expected_status in [(0.85, "reading"), (0.92, "finished")]:
+            scroll_article(page, progress)
             expect(page.locator("#reading-progress")).to_have_text(f"{round(progress*100)}%")
             status(page, "essay-01", expected_status)
         synced(page)
@@ -671,7 +711,7 @@ def mobile_and_demo(browser, base):
         page.locator("#drawer-backdrop").click(position={"x": 380, "y": 400})
         expect(page.locator("#library-toggle")).to_have_attribute("aria-expanded", "false")
     with session(browser, base, demo=True) as (page, repo, _):
-        expect(page.locator(".library-item")).to_have_count(3)
+        expect(page.locator(".library-item")).to_have_count(6)
         page.wait_for_timeout(2500)
         assert "Saving" not in page.locator("#sync-status").inner_text()
         assert not repo.requests, "Demo mode contacted GitHub"
@@ -679,26 +719,26 @@ def mobile_and_demo(browser, base):
         assert TOKEN not in page.evaluate("JSON.stringify({...localStorage})")
         page.goto(base + "/#demo")
         page.reload()
-        expect(page.locator(".library-item")).to_have_count(3)
+        expect(page.locator(".library-item")).to_have_count(6)
         expect(page.locator("#setup-screen")).not_to_be_visible()
         expect(page.locator("#lock-screen")).not_to_be_visible()
         expect(page.locator("#lock-button")).not_to_be_visible()
-        expect(page.locator(NOTES)).to_be_enabled()
+        expect(page.locator(NOTES)).to_be_disabled()
+        expect(page.locator(".source-line")).to_have_count(0)
         assert not repo.requests, "Direct demo link contacted GitHub"
         assert not repo.public_vault_requests, "Reloading demo fetched vault.json"
     with session(browser, base, vault=True) as (page, repo, _):
         expect(page.locator("#setup-screen")).to_be_visible()
         page.locator("#setup-screen [data-demo]").click()
-        expect(page.locator(".library-item")).to_have_count(3)
-        expect(page.locator(NOTES)).to_be_enabled()
+        expect(page.locator(".library-item")).to_have_count(6)
+        expect(page.locator(NOTES)).to_be_disabled()
+        expect(page.locator(".source-line")).to_have_count(0)
         assert not repo.requests, "Setup demo link contacted GitHub"
 
 
 def phase_one_surface(browser, base):
     for mobile in (False, True):
         repo = Repository()
-        repo.items[1]["summary_by"] = "Fictional intake agent"
-        repo.set("library.json", repo.items)
         with session(browser, base, repo, mobile=mobile) as (page, repo, _):
             for selector in ("#settings-open", "#help-open", "#view-toggle", "#theme-toggle", "#library-density"):
                 expect(page.locator(selector)).not_to_be_visible()
@@ -741,17 +781,11 @@ def phase_one_surface(browser, base):
             expect(page.locator("#security-unavailable")).to_be_visible()
             page.keyboard.press("Escape")
             expect(page.locator("#settings-dialog")).not_to_be_visible()
-            expect(page.locator(".article-summary .bot-label")).to_contain_text("from intake")
-            expect(page.locator(".article-summary .bot-label")).not_to_contain_text("Fictional intake agent")
             if mobile:
                 page.locator("#library-toggle").click()
             open_item(page, "essay-02")
-            expect(page.locator(".article-summary .bot-label")).to_contain_text("Fictional intake agent")
             if mobile:
                 page.locator("#notes-toggle").click()
-            expect(page.locator(".notes-topline")).to_contain_text("Notes")
-            assert not re.search(r"the other page", page.locator("body").text_content(), re.I)
-            assert not re.search(r"the other page", page.locator(NOTES).get_attribute("aria-label"), re.I)
 
 
 def selection_toolbar_and_undo(browser, base):
@@ -784,7 +818,7 @@ def selection_toolbar_and_undo(browser, base):
         page.keyboard.press("Escape")
         highlight_id = page.locator("mark[data-highlight]").first.get_attribute("data-highlight")
         synced(page)
-        # Let promotion notices expire so each Undo below addresses only deletion.
+        # Isolate deletion Undo from earlier reader progress notices.
         page.wait_for_timeout(6100)
         page.locator("mark[data-highlight]").first.click()
         page.locator('button[data-note-action="delete"]').first.click()
@@ -835,16 +869,13 @@ def selection_toolbar_and_undo(browser, base):
 
 def automatic_status_undo_and_typing(browser, base):
     with session(browser, base) as (page, repo, _):
-        for slug, previous in (("essay-01", "unread"), ("essay-17", "read")):
+        for slug, previous in (("essay-01", "reading"), ("essay-17", "finished")):
             open_item(page, slug)
-            page.locator(NOTES).fill("Keep this fictional thought after status Undo.")
-            status(page, slug, "commented")
-            page.locator("#toast .toast-message").get_by_role("button", name="Undo", exact=True).last.click()
+            page.locator(NOTES).fill("Keep this fictional thought without changing progress.")
             status(page, slug, previous)
-            expect(page.locator(NOTES)).to_have_value("Keep this fictional thought after status Undo.")
             synced(page)
-            status(page, slug, previous)
-            assert repo.document(f"user/notes/{slug}.json")["long_notes"] == "Keep this fictional thought after status Undo."
+            assert repo.document(f"user/notes/{slug}.json")["long_notes"] == (
+                "Keep this fictional thought without changing progress.")
         open_item(page, "essay-02")
         for editor in (page.locator(NOTES),):
             editor.fill("")
@@ -880,7 +911,7 @@ def automatic_status_undo_and_typing(browser, base):
             expect(page.locator("#reader-star")).to_have_attribute("aria-pressed", "false")
             opened(page, "essay-02")
             page.locator("#smoke-editor").evaluate("el => el.remove()")
-        # A fresh article demonstrates the automatic read threshold and its Undo.
+        # Crossing ninety percent finishes an article; Undo is rearmed only below it.
         open_item(page, "essay-03")
         page.evaluate("""() => {
           const pane=document.querySelector('#reader-pane'), body=document.querySelector('#article-body');
@@ -888,13 +919,16 @@ def automatic_status_undo_and_typing(browser, base):
           pane.scrollTop=start+body.offsetHeight*.94-pane.clientHeight;
           pane.dispatchEvent(new Event('scroll'));
         }""")
-        status(page, "essay-03", "read")
+        status(page, "essay-03", "finished")
         page.locator("#toast .toast-message").get_by_role("button", name="Undo", exact=True).last.click()
-        status(page, "essay-03", "unread")
+        status(page, "essay-03", "reading")
         page.locator("#reader-pane").dispatch_event("scroll")
-        status(page, "essay-03", "unread")
+        status(page, "essay-03", "reading")
         synced(page)
-        assert repo.document("user/state.json")["essay-03"]["status"] == "unread"
+        assert repo.document("user/state.json")["essay-03"]["progress"] == "reading"
+        for fraction, expected in ((.70, "reading"), (.94, "finished")):
+            scroll_article(page, fraction)
+            status(page, "essay-03", expected)
 
 
 def relative_sync_timer(browser, base):
@@ -932,23 +966,21 @@ def store_conflict_export_import(browser, base):
         remote = repo.document("user/notes/essay-06.json")["long_notes"]
         assert "Local fictional edit" in remote and "Concurrent fictional edit" in remote and "<<<<<<<" in remote, remote
         assert sum(path == "user/notes/essay-06.json" for path, _, _ in repo.puts) == 2
-        # A concurrent manual Commented status must not inherit the losing automatic
-        # status's provenance; an unrelated local star must survive the same retry.
+        # A newer remote progress edit wins without losing an unrelated local star.
         page.evaluate("""async () => {
           await smokeStore.saveState({'essay-06': {
-            status:'commented', commented_from:'read', starred:true,
-            status_changed_at:new Date().toISOString()
+            progress:'reading', starred:true, progress_changed_at:new Date().toISOString()
           }});
         }""")
         future = "2099-01-01T00:00:00.000Z"
-        repo.conflicts["user/state.json"] = {"essay-06": {
-            "status": "commented", "commented_from": None, "starred": False,
-            "status_changed_at": future, "_timestamps": {
-                "status": future, "status_changed_at": future, "starred": STAMP}}}
+        concurrent = repo.document("user/state.json")
+        concurrent["essay-06"] = {
+            "progress": "let_go", "starred": False, "progress_changed_at": future,
+            "_timestamps": {"progress": future, "progress_changed_at": future, "starred": STAMP}}
+        repo.conflicts["user/state.json"] = concurrent
         assert page.evaluate("async () => (await smokeStore.flush()).pending") == 0
         merged = repo.document("user/state.json")["essay-06"]
-        assert merged["status"] == "commented" and merged.get("commented_from") is None, merged
-        assert merged["starred"] is True, merged
+        assert merged["progress"] == "let_go" and merged["starred"] is True, merged
         assert sum(path == "user/state.json" for path, _, _ in repo.puts) == 2
         backup = page.evaluate("async () => await smokeStore.exportData()")
         assert backup["format"] == "reading-terminal-user-data" and backup["complete"] is True
@@ -996,8 +1028,12 @@ def vault_library(page):
     expect(page.locator("#lock-button")).to_have_count(1)
     expect(page.locator("#lock-button")).to_be_enabled()
     expect(page.locator('[data-library-id="essay-01"]')).to_have_count(1)
+    if page.locator(".source-line").count() == 0:
+        expect(page.locator(NOTES)).to_be_disabled()
+        if not page.locator('[data-library-id="essay-01"] .library-title').is_visible():
+            page.locator("#library-toggle").click()
+        open_item(page, "essay-01")
     expect(page.locator(NOTES)).to_be_enabled()
-    page.wait_for_selector(".source-line")
 
 
 def unlock_password(page, password=PASSWORD, remember=True):
@@ -1401,6 +1437,221 @@ def cdp_passkey_unlock(browser, base):
             cdp.detach()
 
 
+def legacy_state_fixture():
+    return {
+        "essay-01": {"status": "unread", "starred": True, "status_changed_at": STAMP},
+        "essay-02": {"status": "read", "status_changed_at": STAMP},
+        "essay-03": {"status": "commented", "commented_from": "unread", "status_changed_at": STAMP},
+        "essay-04": {"status": "commented", "commented_from": "read", "status_changed_at": STAMP},
+        "essay-05": {"status": "commented", "commented_from": None, "status_changed_at": STAMP},
+        "essay-06": {"status": "commented", "status_changed_at": STAMP},
+    }
+
+
+def init_store(page):
+    return page.evaluate("""async settings => {
+      const {ReadingStore}=await import('./js/store.js');
+      window.smokeStore=new ReadingStore(settings);
+      const initial=await smokeStore.init();
+      const flush=await smokeStore.flush();
+      return {...initial,flush,backup:await smokeStore.getPreV2Backup()};
+    }""", SETTINGS)
+
+
+def real_state_migration(browser, base):
+    legacy = legacy_state_fixture()
+    raw = json.dumps(legacy, indent=3) + "\n"
+    expected = {"essay-01": "new", "essay-02": "finished", "essay-03": "reading",
+                "essay-04": "finished", "essay-05": "finished", "essay-06": "finished"}
+    for existing_queue in (False, True):
+        repo = Repository()
+        repo.set("user/state.json", raw)
+        if not existing_queue:
+            del repo.files["user/queue.json"]
+        else:
+            repo.set("user/queue.json", {"queue": ["essay-07"], "arrivals_since": STAMP})
+        original_queue = repo.files.get("user/queue.json")
+        with session(browser, base, repo, store_only=True) as (page, repo, _):
+            result = init_store(page)
+            assert result["flush"]["pending"] == 0, result
+            assert result["backup"] == raw, "Pre-v2 backup did not preserve original bytes"
+            state = repo.document("user/state.json")
+            assert {slug: state[slug]["progress"] for slug in expected} == expected
+            assert set(state) == set(expected) | {f"essay-{number:02}" for number in range(17, 25)}
+            absent = page.evaluate("""async record => {
+              const {effectiveState}=await import('./js/model.js');
+              return effectiveState(record);
+            }""", next(item for item in result["library"] if item["id"] == "essay-07"))
+            assert absent["progress"] == "new" and absent["triaged_at"] is None
+            assert absent["position"] == 0 and absent["starred"] is False
+            assert state["essay-01"]["starred"] is True
+            for slug in expected:
+                assert not {"status", "commented_from", "status_changed_at"}.intersection(state[slug])
+                assert state[slug]["last_opened_at"] is None
+                assert state[slug]["progress_changed_at"] == STAMP
+            assert state["essay-01"]["triaged_at"] is None
+            assert state["essay-03"]["triaged_at"]
+            assert [path for path, _, _ in repo.puts].count("user/state.json") == 1
+            assert [path for path, _, _ in repo.puts].count("user/queue.json") == (0 if existing_queue else 1)
+            if existing_queue:
+                assert repo.files["user/queue.json"] == original_queue
+            else:
+                queue = repo.document("user/queue.json")
+                assert queue["queue"] == []
+                assert page.evaluate("value => Number.isFinite(Date.parse(value))", queue["arrivals_since"])
+            page.evaluate("smokeStore.dispose()")
+            writes = len(repo.puts)
+            second = init_store(page)
+            assert second["state"] == state and second["backup"] == raw
+            assert len(repo.puts) == writes, "Second initialization rewrote migrated state or queue"
+            page.evaluate("smokeStore.dispose()")
+    # The first PUT loses to a remote edit made after migration read its baseline.
+    repo = Repository()
+    repo.set("user/state.json", raw)
+    concurrent = json.loads(raw)
+    future = "2099-01-01T00:00:00.000Z"
+    concurrent["essay-01"].update(progress="let_go", starred=False, position=.63,
+                                  last_opened_at=future, custom_field="Concurrent fictional value",
+                                  _timestamps={field: future for field in
+                                               ("progress", "starred", "position", "last_opened_at", "custom_field")})
+    repo.conflicts["user/state.json"] = concurrent
+    with session(browser, base, repo, store_only=True) as (page, repo, _):
+        result = init_store(page)
+        assert result["flush"]["pending"] == 0 and result["backup"] == raw
+        state = repo.document("user/state.json")
+        assert state["essay-01"]["progress"] == "let_go"
+        assert state["essay-01"]["starred"] is False and state["essay-01"]["position"] == .63
+        assert state["essay-01"]["last_opened_at"] == future
+        assert state["essay-01"]["custom_field"] == "Concurrent fictional value"
+        assert state["essay-03"]["progress"] == "reading"
+        assert [path for path, _, _ in repo.puts].count("user/state.json") == 2
+        page.evaluate("smokeStore.dispose()")
+
+
+def demo_state_migration(browser, base):
+    with session(browser, base, demo=True, open_reader=False) as (page, repo, _):
+        result = page.evaluate("""async () => {
+          const {ReadingStore}=await import('./js/store.js');
+          const store=new ReadingStore({}); const initial=await store.init();
+          const backup=await store.getPreV2Backup();
+          const db=await new Promise((resolve,reject)=>{
+            const request=indexedDB.open('reading-terminal-cache');
+            request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);
+          });
+          const records=await new Promise((resolve,reject)=>{
+            const request=db.transaction('cache').objectStore('cache').getAll();
+            request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);
+          });
+          db.close();store.dispose();
+          return {...initial,backup,cached:records.find(r=>r.namespace==='demo:v1'&&r.path==='user/state.json').content};
+        }""")
+        expected = {"demo-library": "new", "demo-city": "finished", "demo-margin": "reading",
+                    "demo-tide": "finished", "demo-map": "finished", "demo-radio": "finished"}
+        assert {key: result["state"][key]["progress"] for key in expected} == expected
+        assert result["cached"] == result["state"]
+        old = json.loads(result["backup"])
+        assert old["demo-margin"]["status"] == "commented"
+        assert result["state"]["demo-margin"]["starred"] is True
+        assert result["queue"] == {"queue": [], "arrivals_since": "2026-06-01T00:00:00.000Z"}
+        assert not repo.requests
+        page.reload()
+        expect(page.locator(".library-item")).to_have_count(6)
+        expect(page.locator(".source-line")).to_have_count(0)
+        expect(page.locator(NOTES)).to_be_disabled()
+        page.locator('[data-library-id="demo-map"] .library-title').click()
+        expect(page.locator(".article-lede")).to_contain_text("fictional Ferncross")
+        expect(page.locator(".article-summary")).to_have_count(0)
+        expect(page.locator('[data-library-id="demo-map"] .library-minutes')).to_contain_text("12")
+        expect(page.locator('[data-library-id="demo-map"] .library-source')).to_have_text("field notes")
+
+
+def reader_progress_and_bot(browser, base):
+    repo = Repository()
+    repo.set("bot/summaries/essay-01.md", "---\nsummary_by: Fictional bot\n"
+             "notes_updated_at: 2026-01-01T00:00:00.000Z\n---\n"
+             "## About your notes\nA fictional reflection on notebook observations.\n\n"
+             "## Connections\n- [Third notebook](article:essay-03) — Shared orchard observations.\n"
+             "- [Fourth notebook](article:essay-04) — Shared fieldwork method.\n")
+    with session(browser, base, repo) as (page, repo, _):
+        expect(page.locator("#notes-pane .bot-content")).to_have_count(0)
+        expect(page.locator("#notes-pane [data-action=keep]")).to_have_count(0)
+        page.locator("#reader-more > summary").click()
+        expect(page.locator("#up-next")).to_be_disabled()
+        expect(page.locator("#up-next")).to_have_attribute("title", "Up next arrives in a later update")
+        page.locator("#let-go").click()
+        status(page, "essay-01", "let_go")
+        page.locator("#toast .toast-message").get_by_role("button", name="Undo", exact=True).last.click()
+        status(page, "essay-01", "reading")
+        bot = page.locator("#bot-box")
+        bot.scroll_into_view_if_needed()
+        expect(bot).to_contain_text("A fictional reflection on notebook observations.")
+        expect(bot.locator(".bot-stale")).to_have_count(0)
+        page.locator(NOTES).fill("A newer fictional observation for the bot to revisit.")
+        expect(bot.locator(".bot-stale")).to_be_visible()
+        bot.locator('[data-action="keep"][data-slug="essay-03"]').click()
+        expect(bot.locator('[data-action="keep"][data-slug="essay-03"]')).to_be_disabled()
+        bot.locator('[data-action="hide"][data-slug="essay-04"]').click()
+        expect(bot.locator('.bot-connection[data-slug="essay-04"]')).to_have_count(0)
+        synced(page)
+        saved = repo.document("user/notes/essay-01.json")
+        assert saved["links"] == [{"slug": "essay-03", "title": "Third notebook"}], saved
+        assert saved["hidden_links"] == ["essay-04"], saved
+        assert saved["long_notes"] == "A newer fictional observation for the bot to revisit."
+        page.reload()
+        opened(page, "essay-01")
+        expect(page.locator('#bot-box [data-action="keep"][data-slug="essay-03"]')).to_be_disabled()
+        expect(page.locator('#bot-box .bot-connection[data-slug="essay-04"]')).to_have_count(0)
+        expect(page.locator('#notes-pane a[data-article="essay-03"]')).to_have_count(1)
+        page.locator('#notes-pane a[data-article="essay-03"]').click()
+        opened(page, "essay-03")
+        assert all(path.startswith("user/") for path, _, _ in repo.puts)
+
+
+def library_filters_and_fallbacks(browser, base):
+    repo = Repository()
+    for item in repo.items[2:]:
+        item["read_minutes"] = 15
+    repo.items[0].update(source_type="fictional-periodical", words=460,
+                         lede="A fictional orchard notebook without an intake summary.")
+    repo.items[0].pop("summary")
+    repo.items[1].update(source_label="Fictional journal", source_type="ignored-source", read_minutes=3)
+    repo.items[2].update(read_minutes=12)
+    repo.set("library.json", repo.items)
+    repo.set("user/notes/essay-03.json", {"long_notes": "Existing fictional field note.",
+                                         "highlights": [], "updated_at": STAMP})
+    with session(browser, base, repo, open_reader=False) as (page, repo, _):
+        first = page.locator('[data-library-id="essay-01"]')
+        second = page.locator('[data-library-id="essay-02"]')
+        expect(first.locator(".library-source")).to_have_text("fictional-periodical")
+        expect(first.locator(".library-minutes")).to_contain_text("2")
+        expect(second.locator(".library-source")).to_have_text("Fictional journal")
+        expect(second.locator(".library-minutes")).to_contain_text("3")
+        assert "undefined" not in first.inner_text() and "NaN" not in first.inner_text()
+        first.locator(".library-star").click()
+        page.locator("#star-filter").click()
+        expect(page.locator(".library-item")).to_have_attribute("data-library-id", "essay-01")
+        page.locator("#star-filter").click()
+        page.locator("#progress-filter").select_option("finished")
+        expect(page.locator(".library-item")).to_have_count(8)
+        page.locator("#progress-filter").select_option("")
+        page.locator("#notes-filter").click()
+        expect(page.locator(".library-item")).to_have_attribute("data-library-id", "essay-03")
+        expect(page.locator('.library-group[data-progress="with-notes"]')).to_have_count(1)
+        page.locator("#notes-filter").click()
+        page.locator("#short-filter").click()
+        expect(page.locator(".library-item")).to_have_count(2)
+        page.locator("#source-filter").select_option("fictional-periodical")
+        expect(page.locator(".library-item")).to_have_attribute("data-library-id", "essay-01")
+        page.locator("#source-filter").select_option("")
+        page.locator("#short-filter").click()
+        open_item(page, "essay-01")
+        expect(page.locator(".article-lede")).to_have_text("A fictional orchard notebook without an intake summary.")
+        expect(page.locator(".article-summary")).to_have_count(0)
+        page.locator("#reader-pane").focus()
+        page.keyboard.press("Escape")
+        expect(page.locator(".source-line")).to_have_count(0)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("base_url", nargs="?", default=os.environ.get("READING_BASE_URL", "http://localhost:8765"))
@@ -1413,7 +1664,9 @@ def main():
             for scenario in (navigation_media_layout, indexed_search, debounce_status_and_growth,
                              highlight_drag_and_persistence, keyboard_stars_and_read, phase_one_surface,
                              selection_toolbar_and_undo, automatic_status_undo_and_typing, relative_sync_timer,
-                             mobile_and_demo, store_conflict_export_import, setup_unlock_remember_lock,
+                             mobile_and_demo, real_state_migration, demo_state_migration,
+                             reader_progress_and_bot, library_filters_and_fallbacks,
+                             store_conflict_export_import, setup_unlock_remember_lock,
                              setup_replacement_and_invalidation, security_password_remove_conflicts,
                              lock_during_search, replacement_during_security_work, cdp_passkey_unlock):
                 scenario(browser, base)

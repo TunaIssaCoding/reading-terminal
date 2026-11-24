@@ -91,6 +91,36 @@ Over time, Lena's most valuable pages became maps of relationships rather than c
 
 The lesson of the fictional notebook is practical rather than romantic. Put a small response close to the thing that produced it, and keep a larger space available when the response begins to grow. The result need not resemble a finished essay. It only needs to preserve the relationship between evidence and thought well enough that tomorrow's reader can continue the work.
 `,
+  'tide-table-for-a-shared-workshop': `## Work around the water
+
+In fictional Saltmere, the boat repair workshop flooded twice a month. Its members stopped treating the tides as interruptions and began keeping a shared table of dry hours. They moved delicate repairs upstairs and left the broad ground-floor benches for jobs that could pause.
+
+The table did not assign anyone a turn. It helped neighbours explain what their work needed, so a quiet painting job and a noisy sanding job could share a week without sharing an afternoon.
+
+## A schedule can hold a conversation
+
+When a storm arrived early, the members changed the table together. The useful part was not a perfect forecast. It was having a place to record why each arrangement had been made, and permission to revise it when the water changed.
+`,
+  'a-map-that-leaves-room': `## An unfinished legend
+
+The imaginary village of Ferncross printed a walking map with a blank square in its legend. Cartographer Nell Vale asked visitors to draw a symbol for something the map had missed. A sheltered step, a drinking fountain, and a particularly patient dog soon acquired their own marks.
+
+## What a line cannot promise
+
+Nell kept the official paths separate from these observations. A visitor's pleasant shortcut was not a promise of public access. The two layers let walkers contribute without disguising a personal experience as a surveyed fact.
+
+By autumn, the blank square was still there. A map that admits what it does not know gives its reader a useful question to carry along.
+`,
+  'the-night-radio-repair': `## Listening before replacing
+
+At the fictional Mossbank repair club, a radio worked every evening except Tuesday. Apprentice Oren Pell wanted to replace its loudspeaker. His neighbour suggested writing down the hours of silence first.
+
+The notebook revealed that the fault coincided with a pottery kiln in the next room. Moving the radio did more than replacing a part could have done.
+
+## Keep the rejected explanation
+
+Oren left his first diagnosis in the notebook with a line through it. Beside it he recorded the observation that changed his mind. The club's next repairer inherited not just a working radio, but a reason to listen before reaching for a spare.
+`,
 };
 
 export const demoLibrary = [
@@ -99,9 +129,11 @@ export const demoLibrary = [
     title: 'Designing a Library That Remembers Why', title_is_generated: false,
     author: 'Mara Ellery · fictional', handle: '@mara-example', url: '',
     created_at: dates[0], source_type: 'essay', words: 620,
+    added_at: dates[0], source_label: 'Bellweather Review', read_minutes: 7,
+    summary_by: 'Bellweather intake bot',
     tags: ['Knowledge systems', 'Reading', 'Memory'],
     summary: 'An imaginary librarian discovers that a collection becomes useful when it remembers the reader’s questions, not just its books. A small experiment in Bellweather suggests how notes can make returning to an idea easier without turning reading into a productivity contest. This is fictional demo content.',
-    images: [], status: 'unread', starred: false, status_changed_at: dates[0],
+    images: [],
   },
   {
     id: 'demo-city', slug: 'slow-signals-in-a-fast-city',
@@ -110,7 +142,7 @@ export const demoLibrary = [
     created_at: dates[1], source_type: 'field notes', words: 650,
     tags: ['Urban ecology', 'Observation', 'Systems'],
     summary: 'A fictional street garden reveals the gap between quick metrics and slow understanding. Repeated visits uncover forms of care that a daily dashboard misses, while careful context makes the numbers more—not less—useful. This is fictional demo content.',
-    images: [], status: 'read', starred: false, status_changed_at: dates[1],
+    images: [],
   },
   {
     id: 'demo-margin', slug: 'the-space-between-observations',
@@ -119,7 +151,35 @@ export const demoLibrary = [
     created_at: dates[2], source_type: 'essay', words: 660,
     tags: ['Thinking tools', 'Craft', 'Attention'],
     summary: 'An invented instrument maker uses the margins of a notebook to keep questions close to their evidence. Her short annotations and longer reflections work at different scales, preserving both the moment of attention and the connections that emerge later. This is fictional demo content.',
-    images: [], status: 'commented', starred: true, status_changed_at: dates[2],
+    images: [],
+  },
+  {
+    id: 'demo-tide', slug: 'tide-table-for-a-shared-workshop',
+    title: 'A Tide Table for a Shared Workshop', title_is_generated: false,
+    author: 'Sela Reed · fictional', url: 'https://saltmere.example/workshop',
+    created_at: '2026-06-20T08:00:00.000Z', added_at: '2026-06-22T08:00:00.000Z',
+    source_label: 'Saltmere Notebook', source_type: 'essay', words: 152, read_minutes: 12,
+    tags: ['Community practices and shared resources', 'Scheduling'],
+    summary: 'A fictional waterside workshop learns to plan around changing tides without mistaking a shared schedule for a fixed rule.',
+    images: [],
+  },
+  {
+    id: 'demo-map', slug: 'a-map-that-leaves-room',
+    title: 'A Map That Leaves Room', title_is_generated: true,
+    author: 'Nell Vale · fictional', url: 'https://ferncross.example/walking-map',
+    created_at: '2026-06-21T11:00:00.000Z', source_type: 'field notes', words: 2700,
+    tags: ['Maps and uncertainty', 'Walking'],
+    lede: 'In fictional Ferncross, Nell leaves a blank square on the walking map for observations that do not fit a fixed legend.',
+    images: [],
+  },
+  {
+    id: 'demo-radio', slug: 'the-night-radio-repair',
+    title: 'The Night Radio Repair', title_is_generated: false,
+    author: 'Oren Pell · fictional', handle: '@oren-example', url: '',
+    created_at: '2026-06-23T17:00:00.000Z', source_type: 'essay', words: 137,
+    tags: ['Repair and observation'],
+    summary: 'A fictional repair club saves a rejected explanation alongside the observation that replaced it.',
+    images: [],
   },
 ];
 
@@ -134,19 +194,30 @@ export const demoNotes = {
       created_at: dates[2], updated_at: dates[2],
     }],
     updated_at: dates[2], long_notes_updated_at: dates[2], deleted_highlights: {},
+    links: [], hidden_links: [],
+  },
+  'tide-table-for-a-shared-workshop': {
+    long_notes: 'A useful schedule records why an arrangement was made, not only the time it starts.',
+    highlights: [], links: [], hidden_links: [],
+    updated_at: '2026-06-24T09:00:00.000Z', long_notes_updated_at: '2026-06-24T09:00:00.000Z',
+    deleted_highlights: {},
   },
 };
 
 export const demoSummaries = {
   'a-library-that-remembers-why': `### Returning, not accumulating\n\nThis fictional essay argues that a personal library should preserve the questions that brought a reader to a text. No personal notes have been written for this demo article yet; consider saving the passage that best explains why you might return.\n\n### Connections\n\n- [The Useful Space Between Observations](#article=the-space-between-observations) puts the question beside its evidence, giving the library's “handle” a precise location.\n- [Slow Signals in a Fast City](#article=slow-signals-in-a-fast-city) asks a similar design question: what gets lost when an easily counted outcome stands in for understanding?`,
   'slow-signals-in-a-fast-city': `### Attention needs an appropriate interval\n\nThe fictional garden study distinguishes immediate feedback from changes that only appear through repeated observation. This demo article is marked read, with no user notes yet. A useful next question is which kinds of context should travel with a measurement.\n\n### Connections\n\n- [Designing a Library That Remembers Why](#article=a-library-that-remembers-why) also resists making visible counts the definition of success.\n- [The Useful Space Between Observations](#article=the-space-between-observations) offers a practical method: preserve a doubt next to the observation that prompted it.`,
-  'the-space-between-observations': `### Keep the moment; make room for the pattern\n\nThe sample notes distinguish two useful scales of writing. A margin note preserves a specific question near the passage that raised it; the longer reflection gathers relationships across several observations. The highlighted sentence identifies proximity—not polish—as the key to preserving context.\n\nThe open question about changing an interpretation is particularly useful. It turns a saved passage into a revisable claim instead of a permanent endorsement. These are fictional sample notes and a fictional bot summary, not generated from any private reading history.\n\n### Connections\n\n- [Designing a Library That Remembers Why](#article=a-library-that-remembers-why): both pieces treat questions as handles for returning to an idea.\n- [Slow Signals in a Fast City](#article=slow-signals-in-a-fast-city): contextual observations beside a chart play the same role as questions beside a passage.`,
+  'the-space-between-observations': `---\nsummary_by: Bellweather notes bot\nconnections_by: Bellweather connection bot\ndate: 2026-06-09T09:00:00.000Z\nnotes_updated_at: 2026-06-09T09:00:00.000Z\n---\n\n### Keep the moment; make room for the pattern\n\nThe sample notes distinguish two useful scales of writing. A margin note preserves a specific question near the passage that raised it; the longer reflection gathers relationships across several observations. The highlighted sentence identifies proximity—not polish—as the key to preserving context.\n\nThe open question about changing an interpretation is particularly useful. It turns a saved passage into a revisable claim instead of a permanent endorsement. These are fictional sample notes and a fictional bot summary, not generated from any private reading history.\n\n### Connections\n\n- [Designing a Library That Remembers Why](#article=a-library-that-remembers-why): both pieces treat questions as handles for returning to an idea.\n- [Slow Signals in a Fast City](#article=slow-signals-in-a-fast-city): contextual observations beside a chart play the same role as questions beside a passage.`,
 };
 
-export const demoState = {};
-export const demoMeta = {
-  updated_at: dates[0],
-  notes_summary_len: {
-    'the-space-between-observations': demoSummaries['the-space-between-observations'].length,
-  },
+// Seed legacy state only on the first load of the existing demo namespace.
+export const demoState = {
+  'demo-library': { status: 'unread', starred: false, status_changed_at: dates[0] },
+  'demo-city': { status: 'read', starred: false, status_changed_at: dates[1] },
+  'demo-margin': { status: 'commented', commented_from: 'unread', starred: true, status_changed_at: dates[2] },
+  'demo-tide': { status: 'commented', commented_from: 'read', starred: false, status_changed_at: '2026-06-22T08:00:00.000Z' },
+  'demo-map': { status: 'commented', commented_from: null, starred: false, status_changed_at: '2026-06-21T11:00:00.000Z' },
+  'demo-radio': { status: 'commented', starred: false, status_changed_at: '2026-06-23T17:00:00.000Z' },
 };
+export const demoQueue = { queue: [], arrivals_since: '2026-06-01T00:00:00.000Z' };
+export const demoMeta = { updated_at: '2026-06-24T09:00:00.000Z' };

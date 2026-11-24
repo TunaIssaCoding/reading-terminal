@@ -1,6 +1,6 @@
 # Reading Terminal
 
-A static, local-first reading workspace. No build step, framework, backend, analytics, or third-party scripts. Unlock your private library with a passkey, with your own password as backup. The lock/setup screens also offer **Explore the demo**: three fictional articles whose edits stay on that device and never touch GitHub. Loading `#demo` skips vault/token loading; demo article links retain `#demo&article=…` so reloads stay in the isolated `demo:v1` namespace.
+A static, local-first reading workspace. No build step, framework, backend, analytics, or third-party scripts. Unlock your private library with a passkey, with your own password as backup. The lock/setup screens also offer **Explore the demo**: six fictional articles whose edits stay on that device and never touch GitHub. Loading `#demo` skips vault/token loading; demo article links retain `#demo&article=…` so reloads stay in the isolated `demo:v1` namespace. Library remains the default view; opening the app without an article link does not open an article.
 
 ## Publish the app
 
@@ -46,6 +46,7 @@ assets/pdf/<slug>.pdf
 assets/images/<file>
 search-index.json             # optional
 user/state.json
+user/queue.json
 user/notes/<slug>.json
 bot/summaries/<slug>.md
 bot/meta.json
@@ -64,21 +65,24 @@ bot/meta.json
     "handle": "@example",
     "url": "https://example.com/essay",
     "created_at": "2026-01-01T12:00:00Z",
+    "added_at": "2026-01-02T12:00:00Z",
+    "source_label": "Example journal",
+    "lede": "The opening thought of this example essay.",
+    "read_minutes": 4,
     "source_type": "essay",
     "words": 800,
     "tags": ["Design", "Attention"],
     "summary": "A short introduction. A second sentence describing the argument.",
     "pdf_url": null,
     "pdf_path": "assets/pdf/example-essay.pdf",
-    "images": ["assets/images/example-diagram.png"],
-    "status": "unread",
-    "starred": false,
-    "status_changed_at": "2026-01-01T12:00:00Z"
+    "images": ["assets/images/example-diagram.png"]
   }
 ]
 ```
 
 Ids must be stable; slugs must be safe single path components. The first tag is the knowledge domain. Article bodies are markdown. Generated titles (`title_is_generated: true`) are subtly italicised.
+
+Optional metadata falls back as follows: `added_at` → `created_at`; `read_minutes` → `ceil(words / 230)`; `source_label` → `source_type`. Without `summary`, the reader shows only `lede` when supplied. It does not invent an intake summary.
 
 **PDFs:** put the file in the private repository under `assets/pdf/` and set `pdf_path` to its repository-relative path, not a local filesystem path. The app fetches it through the authenticated Contents API, caches it as a PDF blob, and opens its object URL in a new tab. An absolute HTTP(S) `pdf_url` remains supported and takes precedence when both fields are supplied. No token is attached to external URLs.
 
@@ -92,7 +96,24 @@ Ids must be stable; slugs must be safe single path components. The first tag is 
 
 Full text gives complete body search; a truncated excerpt (for example, the first 2,000 characters) only searches that excerpt until the full body is opened or cached in the current session. The index is fetched once per connection session and cached in IndexedDB. Missing, malformed or unavailable indexes gracefully fall back to cached index entries or lazy body fetching; missing/non-string entries fall back per article. The app never writes the index.
 
-`user/state.json` maps article **id** to `{status, starred, status_changed_at, last_opened_at}`. These fields override library metadata. The app also records field timestamps and `commented_from` (`"unread"`, `"read"`, or `null`) to distinguish automatic promotion from a manual status choice. Status and its promotion provenance merge together. Preserve these fields in backups. `user/notes/<slug>.json` contains:
+`user/state.json` maps article **id** to `{progress, position, starred, triaged_at, progress_changed_at, last_opened_at, _timestamps}`. `progress` is `new`, `reading`, `finished`, or `let_go`; `position` is a 0–1 scroll fraction. `starred` is displayed as **★ Keeper** (“worth coming back to”), independently of progress. `_timestamps` preserves per-field conflict merging. Untriaged/unopened timestamps can be `null`. Has notes is never stored: it is derived from nonblank long notes or highlight note text in the notes file.
+
+`user/queue.json` is app-owned: `{ "queue": [], "arrivals_since": "<ISO>" }`. Phase 2.1 creates it only when missing, including on conflict retries; it never overwrites an existing queue. Add to Up next is disabled with “Up next arrives in a later update.” There is no Arrivals, Up next, triage, shelves, Edition or Listen UI.
+
+### One-time v2 migration
+
+Before writing converted state, the app saves the original `state.json` text in its namespaced IndexedDB backup store. No download is required. **Settings → Backup → Export pre-v2 backup** exports that original state file. The backup survives Lock, is not encrypted by the vault, and is lost if browser storage is cleared. When migrating an old offline cache without original formatting, the backup serializes its pre-conversion content.
+
+| Legacy state | Progress |
+| --- | --- |
+| Unread | New, untriaged |
+| Read | Finished |
+| Commented, `commented_from: "unread"` | Reading |
+| Commented, `commented_from: "read"` or null/missing | Finished |
+
+Migration removes `status`, its legacy timestamps, and `commented_from`; non-New entries receive `triaged_at`. Clean v2 state is not rewritten on later loads. SHA retries reapply conversion to fresh remote state and preserve concurrent user fields. The fictional demo follows the same migration in its own namespace.
+
+`user/notes/<slug>.json` contains:
 
 ```json
 {
@@ -109,22 +130,25 @@ Full text gives complete body search; a truncated excerpt (for example, the firs
       "updated_at": "2026-01-01T12:00:00Z"
     }
   ],
+  "links": [{ "slug": "another-essay", "title": "Another essay" }],
+  "hidden_links": [],
   "updated_at": "2026-01-01T12:00:00Z"
 }
 ```
 
 The app may add a highlight `start` offset, `long_notes_updated_at`, and `deleted_highlights` tombstones for robust anchoring and concurrent edits. Preserve these extra fields when moving data. Never have the bot overwrite `user/*`.
 
-The bot owns `library.json`, `articles/*`, `assets/*`, optional `search-index.json`, `bot/summaries/<slug>.md`, and `bot/meta.json`. The app **only PUTs `user/state.json` and `user/notes/<slug>.json`**. Optional bot metadata is `{ "updated_at": "…", "notes_summary_len": { "example-essay": 123 } }`. Bot summary markdown can contain a `## Connections` section. Link to another article with `[Title](article:other-slug)`, `[Title](articles/other-slug.md)`, `[Title](#article=other-slug)`, or `[[other-slug|Title]]`.
+The bot owns `library.json`, `articles/*`, `assets/*`, optional `search-index.json`, `bot/summaries/<slug>.md`, and `bot/meta.json`. The reading store **only PUTs `user/state.json`, create-only `user/queue.json`, and `user/notes/<slug>.json`**. Bot summaries are fetched lazily when an article opens; a missing summary is normal. Front matter can provide `summary_by`, `date` or `updated_at`, `notes_updated_at`, `connections_by`, and a `connections` YAML-like list of `{slug, title, why}`. The body can contain `## About your notes` and a `## Connections` markdown list. Article links can use `[Title](article:other-slug)`, `[Title](articles/other-slug.md)`, `[Title](#article=other-slug)`, or `[[other-slug|Title]]`.
 
 ## Reading and writing
 
-- **Library:** collapsible Unread / Read / Commented groups. Unread and Read sort by most recent status change; Commented sorts by bot summary length, falling back to note length. Stars are independent of status. Click a tag to filter; click it again or the filter chip to clear. **⋯ → View** contains the Compact / Comfortable density toggle and the theme toggle; both save device-local preferences.
+- **Library:** New / Reading / Finished / Let go groups, newest added first. Filters: Progress, ★ Keepers, ✎ With notes, ≤ 10 min, and Source (from `source_label`). **With notes · most recent** sorts globally by the notes file's `updated_at`, not summary length. Rows show one full domain chip, source label, minutes, a `✎ n` badge (annotated highlights + one for long notes), and a thin Reading progress bar. Click a domain to filter. **⋯ → View** contains Compact / Comfortable density and theme controls.
 - **Navigation:** opening an article from the list, keyboard or internal link adds browser history. Back and Forward restore the article without adding another entry; initial restoration replaces the current entry.
-- **Status:** scrolling through about 90% of the article marks it read. Typing any margin or long note marks it commented. Removing all note text restores the previous unread/read status only when Commented was automatic; highlights without note text do not count. Manual Commented remains Commented. Reading alone never downgrades Commented. Every automatic status change offers **Undo for 6 seconds**. Undo restores the previous status/provenance without removing notes; an undone auto-read does not repeat for that article until reconnect. The row's `⋯` menu can explicitly choose any status; the next substantive note edit promotes it again.
+- **Progress:** opening New sets Reading and saves `last_opened_at`; other progress is preserved on open. Reaching 90% marks Reading as Finished and shows **Marked finished · Undo** for six seconds. Undo returns to Reading and cannot immediately re-trigger until scrolling below 90%. `r` toggles Finished / Reading. **Let go** is in the reader's ⋯ menu with Undo. Notes never change progress. Keeper is independent. The reader header shows progress and percentage while Reading; ⋯ also holds Open PDF and Open source.
 - **Interlinear notes:** select source text and press `h`, or use the floating **Highlight / Send to notes / Copy** toolbar. The browser's right-click menu is never replaced. Selection changes also position the toolbar above touch selections, clamped inside the visible viewport. The focused highlight editor starts below the selected first letter and continues through following line gaps. Extra rows expand spacing rather than obscure the source. Use arrows to move between note fragments; paste works across gaps. Click a highlight or its amber note to edit. Esc closes editing; Backspace on an empty note closes it but keeps the highlight. `×` deletes the highlight immediately, with **Undo for 6 seconds**, including after navigating to another article. Anchors use exact quote, surrounding context and paragraph hint; if the source changed beyond recognition, the preserved note appears in a warning below the article.
 - **Long notes:** write markdown in the right pane, normally exactly 30% of the viewport. The editor grows and shrinks with its content; the pane, not the editor, scrolls. Drag its left edge or focus the separator and press arrow keys to resize. Drag highlighted text (including an existing text selection) onto the notes area to append a block quote after one empty line. The highlight's `↗` action and each margin entry's Send button provide keyboard/touch alternatives.
-- **Notes order:** long notes → divider → live margin notes → read-only bot summary → connections. Bot material is displayed, not generated or edited by this app. Dashed boxes distinguish bot text from your own notes and highlights. The intake summary is headed **Summary · from intake**, followed by `summary_by` when supplied; no writer is invented. Existing bot-summary markdown may supply `summary_by` / `connections_by` in front matter for its headings.
+- **Your notes:** long markdown notes → reading-order highlights (click a quote to jump) → kept links. No bot content appears in this pane. Article source lines use approximately 1.6 line height; only a note/editor opens extra space underneath its line. The intake summary remains labelled **Summary · from intake**.
+- **End-of-article bot box:** dashed, attributed to `summary_by` and its date, or **Reading bot** when no author is supplied. “About your notes” uses the safe markdown renderer. Connections are headed “Suggested by” their `connections_by`; **Keep link** saves `{slug, title}` to the current notes file's `links[]`, **Hide** saves a slug to `hidden_links[]` and offers Undo. Kept links are marked Kept; hidden suggestions disappear. If notes are newer than `notes_updated_at`, the box says “Your notes changed since this was written.” The app never edits bot files.
 - **Top bar:** Library and the current view controls stay left; successful private sync shows relative age and an exact local-time tooltip, refreshed every 15 seconds. Queued/error states remain explicit; demo saves are labelled local, not synced. Lock and **⋯ → View / Settings / Help** are on the right.
 - **Mobile:** the top bar keeps Library, the title, Notes and ⋯; sync, mode and Lock move into ⋯. Library and Notes open slide-over drawers. Tap outside or press Esc outside an editor to close. Use the selection toolbar or Send action to move a highlight to Notes on touch devices.
 - **Settings:** Security first, then Backup, then Connection. **Advanced: connect with a token** is last and collapsed whenever Settings opens. Feedback uses one toast system; overlapping Undo actions each retain their own six-second window.
@@ -135,8 +159,8 @@ The bot owns `library.json`, `articles/*`, `assets/*`, optional `search-index.js
 | --- | --- |
 | `j` / `k` | Focus next / previous item in expanded groups |
 | `Enter` | Open focused item |
-| `r` | Toggle read (commented remains commented; item menu can override) |
-| `s` | Toggle current article's star |
+| `r` | Toggle Finished / Reading |
+| `s` | Toggle current article's Keeper |
 | `h` | Highlight source selection |
 | `n` | Focus long notes |
 | `/` | Focus search |
@@ -149,11 +173,11 @@ Reading shortcuts do not fire inside inputs, textareas, contenteditable editors,
 
 Every edit is saved to the local cache and durable queue before a roughly two-second network debounce. Blur, hidden visibility and reconnect also request a flush. Closing a browser can interrupt a network request; the durable queue resumes on the next load. Wait for the sync indicator before switching to another device if possible.
 
-Opening an article does not enqueue a write or make a GitHub commit. The initial auto-open does not change state. Later open timestamps remain in memory until bundled with another real state edit (status/star); leaving before such an edit can discard those timestamps, never notes.
+Article opens are state edits: they save `last_opened_at` and move New to Reading. Reading position is locally saved at most once per 750 ms while scrolling, with a trailing save and a flush on navigation/blur/hidden visibility; network writes use the existing debounce. The app restores saved Reading position on reopen.
 
 Private caches are separated by owner/repository/branch. SHA conflicts trigger a fresh read and a bounded retry. Highlights merge by id and update timestamp; deletion tombstones prevent resurrection. State merges by field. Concurrent differing long-note edits preserve **both** versions with a visible conflict marker, newer first; resolve the marker by editing the long notes. Failed writes remain queued and are surfaced in the top bar, rather than being silently treated as synced. GitHub permissions, expired tokens and rate limits can prevent sync; fix settings or reconnect and retain a backup.
 
-Settings → **Export backup** downloads all available user state/notes, without your token or article bodies. Export online to retrieve uncached and orphaned remote notes. If remote enumeration or retrieval fails, the download is visibly named **PARTIAL**, the JSON includes `complete: false` and warnings, and Settings tells you to reconnect and export again. This preserves an emergency copy of cached work without claiming a complete remote backup. **Import backup** merges through the same save/sync pipeline. Keep backups private and secure.
+Settings → **Export backup** downloads all available user state, queue and notes, without your token or article bodies. Export online to retrieve uncached and orphaned remote notes. If remote enumeration or retrieval fails, the download is visibly named **PARTIAL**, the JSON includes `complete: false` and warnings, and Settings tells you to reconnect and export again. **Import backup** merges through the same save/sync pipeline; an existing remote queue is never replaced. **Export pre-v2 backup** separately exports the retained original state JSON, not a full user-data backup. Keep backups private and secure.
 
 ## Implementation and verification
 

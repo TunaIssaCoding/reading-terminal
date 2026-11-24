@@ -263,3 +263,102 @@ PASS all fictional headless reading-terminal regressions
 The suite additionally passed all four full/absent/malformed/partial search-index cases. No uncaught browser exceptions or unexpected network requests were reported. Coverage includes mouse and emulated-touch toolbar use, six-second deletion/Undo expiry and persistence, contenteditable/input/lock shortcut guards, reader Esc, mobile top bar, sync-age refresh without writes, replacement rejection for non-exact REPLACE, independent passkey Undo windows, conflict retries and cancellation on Lock. The original navigation/media, notes/drag/persistence, store merge/backup and vault scenarios remain passing. Verification services were stopped afterward.
 
 Native iPhone/iPad Safari, physical Face ID/Touch ID and live GitHub/Pages publication were not available for verification. Chrome touch emulation and a virtual authenticator do not establish native Safari or physical-device support. No real credentials or private reading data were used in the tests.
+
+## v2 phase 2.1
+
+### Changes
+
+- Replaced the old status model and all four Commented rules with per-field `progress`, `position`, Keeper (`starred`), triage/change/open timestamps. Notes do not alter progress. First-load migration handles every legacy mapping, manual Commented and mixed/already-v2 state; removes legacy status/provenance fields; retains unknown user fields.
+- Migration durably retains the original state JSON in the namespaced IndexedDB `backups` store before queueing a write. Settings → Backup exposes **Export pre-v2 backup**, without requiring a download during migration. Clean v2 state is not rewritten. Retry conversion uses the fresh remote and merge ancestor, preserving concurrent user fields and edits queued during PUT.
+- Added app-owned `user/queue.json` creation with migration-time `arrivals_since`. Existing queues are never overwritten, including SHA races. **Choice: Add to Up next is disabled**, with the required tooltip; no queue-cap UI or mutation was implemented.
+- Library stays the default, with no implicit article open. Opening New marks Reading and saves `last_opened_at`; Reading position is saved on a 750 ms throttle and restored on reopening. Reaching 90% marks Finished with six-second Undo; Undo returns to Reading and re-arms only below 90%. `r`, `s`, Let go/Undo, progress chip, Keeper label and reader source/PDF menu are integrated.
+- Added an attributed, dashed end-of-article bot box. It lazily reads cached summaries, accepts YAML-like/markdown connections, safely renders About your notes, shows stale-note warnings, and persists Keep/Hide decisions in user notes only. Hidden-link three-way merging supports Undo without losing unrelated concurrent decisions.
+- Your notes contains only long markdown notes, reading-order highlights with jump controls, and kept links. Source line height is approximately 1.6; empty interlinear gaps collapse. A bare highlight opens an editor only when selected.
+- Library supports new-field fallbacks, generated-title italics, one uncut domain chip, source/minutes, derived `✎ n` badges and Reading bars. Progress/Keeper/With notes/short/Source filters are wired; With notes sorts globally by note update time, not bot summary length. Existing title/author/tag/body search remains unchanged. Notes enumeration avoids one missing-file probe per library item.
+- Expanded demo to six fictional articles covering every migration row, old/new metadata, a lede-only fallback, stale attributed connections and future Arrivals data without Arrivals UI. Retained isolated `demo:v1`; bumped shell cache to `reading-terminal-shell-v5` and listed all three new modules.
+- Updated README and DESIGN, added pure model/bot/progress tests and extended the full fictional browser harness.
+
+### Verification actually run
+
+From `site/`, served the app with:
+
+```sh
+python3 -m http.server 8766 --bind 127.0.0.1
+```
+
+Syntax checks passed for all **16 application JavaScript files and 6 test modules**:
+
+```sh
+node --check sw.js && node --check js/app.js && node --check js/auth.js && node --check js/bot.js && node --check js/demo.js && node --check js/library.js && node --check js/markdown.js && node --check js/model.js && node --check js/notes.js && node --check js/passkey.js && node --check js/progress.js && node --check js/reader.js && node --check js/session.js && node --check js/store.js && node --check js/vault-api.js && node --check js/vault.js && node --check tests/index.mjs && node --check tests/no-dialogs.test.mjs && node --check tests/vault.test.mjs && node --check tests/model.test.mjs && node --check tests/bot.test.mjs && node --check tests/progress.test.mjs && node --test tests/
+```
+
+Node reported **49 tests passed, 0 failed, 0 skipped**, including `no-dialogs.test.mjs` and `vault.test.mjs`. New coverage includes all migration mappings, idempotence/residue, concurrent remote and in-flight edits, arrivals/pile boundaries, metadata fallbacks, bot parsing/staleness, connection merging, and 90%/Undo/re-arm.
+
+Direct system-Chrome visual inspection covered the fictional demo at **1440 × 900** and **390 × 844**: Library default, full domain chips, generated-title/lede fallback, progress/Keeper/menu controls, inline-note spacing, end-article attribution/stale connections, and Settings' pre-v2 export button. Scrolling to the bot box visibly marked Finished and displayed Undo. No page exceptions were reported by that inspection; the managed tab was closed.
+
+The initial full smoke run exposed a stale visual keyboard cursor after clicking an already-open article following a filter. `Library` now updates its cursor before invoking the open callback; the focused `keyboard_stars_and_read` scenario passed after the correction.
+
+Final full smoke command:
+
+```sh
+python3 tests/smoke.py http://localhost:8766
+```
+
+**Passed all 21 top-level scenarios in 142.47 seconds** with `/usr/bin/google-chrome`, fictional data and intercepted API/vault endpoints:
+
+```text
+PASS navigation_media_layout
+PASS indexed_search
+PASS debounce_status_and_growth
+PASS highlight_drag_and_persistence
+PASS keyboard_stars_and_read
+PASS phase_one_surface
+PASS selection_toolbar_and_undo
+PASS automatic_status_undo_and_typing
+PASS relative_sync_timer
+PASS mobile_and_demo
+PASS real_state_migration
+PASS demo_state_migration
+PASS reader_progress_and_bot
+PASS library_filters_and_fallbacks
+PASS store_conflict_export_import
+PASS setup_unlock_remember_lock
+PASS setup_replacement_and_invalidation
+PASS security_password_remove_conflicts
+PASS lock_during_search
+PASS replacement_during_security_work
+PASS cdp_passkey_unlock
+PASS all fictional headless reading-terminal regressions
+```
+
+This includes all four search-index variants, actual trusted selected-text dragging, highlight jump visibility, real-mode legacy migration with exactly one state write plus missing queue creation, byte-preserved backup, zero writes on second initialization, existing queue preservation, and a SHA-conflict retry retaining concurrent remote progress/position/Keeper/custom fields. Browser checks also covered demo migration, progress/Undo/re-arm, Let go/Undo, Keep/Hide persistence, stale notes, filters/fallbacks, and the existing virtual-authenticator PRF flow. No uncaught browser exceptions or unexpected network requests were reported.
+
+After the cursor fix, `node --check js/library.js && node --test tests/` passed again: **49/49**, no skips. The verification server was stopped after the runs.
+
+### Fix pass 1 — sparse migration
+
+- `migrateState` now materializes missing legacy library entries only for non-default status or `starred: true`. Unread records with false/missing Keeper remain absent. Existing state ids, including orphans, still migrate without losing unrelated fields. The mapping table, all-v2 no-op behavior, backup ordering, queue create-only behavior and conflict merge paths remain intact.
+- Added shared `effectiveState` projection for application items and arrival classification. Absent entries read as New, untriaged, position 0 and not a Keeper unless library-level legacy defaults override them; legacy Read/Commented and Keeper defaults also work when state remains absent on an already-v2 load. Explicit user state takes precedence.
+- Added unit regressions for 1,000 unread library records plus three legacy state entries (including an orphan): exactly three migrated entries, or five with two library Keeper defaults. Coverage checks absent-entry reads before/after migration, empty/default-only state, library defaults on all-v2 loads, input preservation and second-run no-op.
+- Strengthened real-mode browser smoke to require exactly the six existing state ids plus eight non-default library ids, leaving untouched unread ids absent. Existing backup, queue preservation, second-initialization zero-write and SHA-conflict assertions passed unchanged.
+
+Actual fix-pass verification, from `site/`:
+
+```sh
+python3 -m http.server 8808 --bind 127.0.0.1
+node --check sw.js && node --check js/app.js && node --check js/auth.js && node --check js/bot.js && node --check js/demo.js && node --check js/library.js && node --check js/markdown.js && node --check js/model.js && node --check js/notes.js && node --check js/passkey.js && node --check js/progress.js && node --check js/reader.js && node --check js/session.js && node --check js/store.js && node --check js/vault-api.js && node --check js/vault.js && node --check tests/index.mjs && node --check tests/no-dialogs.test.mjs && node --check tests/vault.test.mjs && node --check tests/model.test.mjs && node --check tests/bot.test.mjs && node --check tests/progress.test.mjs
+node --test tests/
+python3 tests/smoke.py http://localhost:8808
+```
+
+All **16 application JS files and 6 test modules** passed syntax checking. Unit results: **53 passed, 0 failed, 0 skipped**. Full fictional browser smoke: **all 21 top-level scenarios passed in 141.99 seconds**, including all four search-index variants and virtual-authenticator PRF add/unlock.
+
+A separate in-memory synthetic run with **1,492 unread/unstarred library records and six legacy state entries, including an orphan**, retained exactly **six entries**, serialized to **2,491 compact JSON bytes**, and returned `changed: false` on the second migration. These sizes describe only the synthetic fixture, not real user data.
+
+No `vault.json` was created or edited; no secrets or real data, commit, push or deployment were used.
+
+### Boundaries and limits
+
+Only release 2.1 was implemented. No Tasks changes, Arrivals/Up next/triage/shelves/Edition UI, Listen, external scripts, real data, commits, pushes or deployment. No `vault.json` was created or edited. The optional Up next-cap test does not apply to the disabled choice.
+
+Native iPhone/iPad Safari, physical authenticators and live GitHub/Pages publication were not available for verification. Chrome mobile/touch emulation and the virtual authenticator are not evidence of native Safari or physical-device support. The new parser avoids regex lookbehind and external dependencies. Pre-v2 backups survive Lock but remain unencrypted device data; clearing browser storage deletes them.

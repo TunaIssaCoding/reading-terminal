@@ -1,11 +1,12 @@
-import { demoLibrary, demoArticles, demoNotes, demoSummaries, demoState, demoMeta } from './demo.js';
+import { demoLibrary, demoArticles, demoNotes, demoSummaries, demoState, demoMeta, demoQueue } from './demo.js';
+import { migrateState, libraryFields } from './model.js';
 
 const SETTINGS_KEY = 'reading-terminal.settings';
 const DATABASE = 'reading-terminal-cache';
 const DEFAULT_SETTINGS = Object.freeze({ owner: 'TunaIssaCoding', repo: 'reading-data', branch: 'main', token: '' });
 const EPOCH = '1970-01-01T00:00:00.000Z';
-const STATE_FIELDS = ['status', 'starred', 'status_changed_at', 'last_opened_at'];
-const STATUSES = new Set(['unread', 'read', 'commented']);
+const STATE_FIELDS = ['progress', 'position', 'starred', 'triaged_at', 'progress_changed_at', 'last_opened_at'];
+const PROGRESS = new Set(['new', 'reading', 'finished', 'let_go']);
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const clone = value => value === undefined ? undefined : structuredClone(value);
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -44,7 +45,7 @@ function safeSlug(slug) {
 }
 
 function writablePath(path) {
-  if (path === 'user/state.json') return true;
+  if (path === 'user/state.json' || path === 'user/queue.json') return true;
   const match = /^user\/notes\/([^/]+)\.json$/.exec(path);
   if (!match) return false;
   try { safeSlug(match[1]); return true; } catch { return false; }
@@ -55,17 +56,20 @@ function noteSlug(path) {
 }
 
 function emptyNotes() {
-  return { long_notes: '', highlights: [], updated_at: EPOCH, long_notes_updated_at: EPOCH, deleted_highlights: {} };
+  return { long_notes: '', highlights: [], links: [], hidden_links: [], updated_at: EPOCH, long_notes_updated_at: EPOCH, deleted_highlights: {} };
 }
 
 function normalizeNotes(input) {
   if (input == null) return emptyNotes();
   if (!dictionary(input) || (input.long_notes !== undefined && typeof input.long_notes !== 'string') ||
-      (input.highlights !== undefined && !Array.isArray(input.highlights))) {
-    throw new Error('Invalid notes data: expected long_notes text and a highlights array.');
+      (input.highlights !== undefined && !Array.isArray(input.highlights)) ||
+      (input.links !== undefined && !Array.isArray(input.links)) ||
+      (input.hidden_links !== undefined && !Array.isArray(input.hidden_links))) {
+    throw new Error('Invalid notes data: expected text and highlights, links and hidden_links arrays.');
   }
   const result = {
     long_notes: input.long_notes || '', highlights: [],
+    links: mergeLinks(input.links || []), hidden_links: [...new Set((input.hidden_links || []).map(safeSlug))].sort(),
     updated_at: newest(input.updated_at),
     long_notes_updated_at: newest(input.long_notes_updated_at || input.updated_at),
     deleted_highlights: {},
@@ -103,6 +107,25 @@ function normalizeNotes(input) {
   return result;
 }
 
+function mergeLinks(...lists) {
+  const links = new Map();
+  for (const list of lists) for (const link of list) {
+    if (!dictionary(link) || typeof link.title !== 'string') throw new Error('Invalid note link: expected slug and title.');
+    const slug = safeSlug(link.slug);
+    const previous = links.get(slug);
+    if (!previous || link.title.localeCompare(previous.title) > 0) links.set(slug, { slug, title: link.title });
+  }
+  return [...links.values()].sort((a, b) => a.slug.localeCompare(b.slug));
+}
+
+function mergeHiddenLinks(a, b, base) {
+  const left = new Set(a);
+  const right = new Set(b);
+  const ancestor = new Set(base);
+  return [...new Set([...a, ...b])].filter(slug => ancestor.has(slug)
+    ? left.has(slug) && right.has(slug) : left.has(slug) || right.has(slug)).sort();
+}
+
 function longNoteMerge(local, remote, base) {
   const a = local.long_notes;
   const b = remote.long_notes;
@@ -136,6 +159,7 @@ export function mergeNotes(local, remote, base = null) {
   const result = {
     long_notes: text.text, highlights: [], updated_at: newest(a.updated_at, b.updated_at),
     long_notes_updated_at: text.time, deleted_highlights: {},
+    links: mergeLinks(a.links, b.links), hidden_links: mergeHiddenLinks(a.hidden_links, b.hidden_links, ancestor.hidden_links),
   };
   for (const id of [...ids].sort()) {
     const left = am.get(id);
@@ -169,57 +193,68 @@ function normalizeState(input) {
   const state = {};
   for (const [id, entry] of Object.entries(input)) {
     if (!safeKey(id) || !dictionary(entry)) throw new Error('Invalid article state entry.');
-    const item = { _timestamps: {} };
+    const item = clone(entry);
+    item._timestamps = dictionary(entry._timestamps) ? { ...entry._timestamps } : {};
     for (const field of STATE_FIELDS) {
       if (entry[field] === undefined) continue;
-      if (field === 'status' && !STATUSES.has(entry[field])) throw new Error(`Invalid reading status for ${id}.`);
+      if (field === 'progress' && !PROGRESS.has(entry[field])) throw new Error(`Invalid reading progress for ${id}.`);
+      if (field === 'position' && (!Number.isFinite(entry[field]) || entry[field] < 0 || entry[field] > 1)) throw new Error(`Invalid reading position for ${id}.`);
       if (field === 'starred' && typeof entry[field] !== 'boolean') throw new Error(`Invalid starred flag for ${id}.`);
-      if (field.endsWith('_at') && typeof entry[field] !== 'string') throw new Error(`Invalid timestamp for ${id}.`);
-      item[field] = entry[field];
+      if (field.endsWith('_at') && entry[field] !== null && typeof entry[field] !== 'string') throw new Error(`Invalid timestamp for ${id}.`);
       item._timestamps[field] = newest(entry._timestamps?.[field] || entry[`${field}_updated_at`] ||
-        (field === 'status_changed_at' ? entry.status_updated_at : undefined) || entry.updated_at ||
-        (field === 'last_opened_at' ? entry.last_opened_at : entry.status_changed_at));
-    }
-    if (item.status !== undefined) {
-      item.commented_from = item.status === 'commented' && ['unread', 'read'].includes(entry.commented_from) ? entry.commented_from : null;
+        entry.updated_at || (field === 'last_opened_at' ? entry.last_opened_at : entry.progress_changed_at));
     }
     state[id] = item;
   }
   return state;
 }
 
-function mergeState(local, remote, base = {}) {
+export function mergeState(local, remote, base = {}) {
   const a = normalizeState(local);
   const b = normalizeState(remote);
   const ancestor = normalizeState(base);
   const result = {};
   for (const id of [...new Set([...Object.keys(a), ...Object.keys(b)])].sort()) {
-    const item = { _timestamps: {} };
-    for (const field of STATE_FIELDS) {
-      // Status and its automatic-promotion provenance are one conflict unit.
-      const value = entry => field === 'status' && entry?.status !== undefined
-        ? { status: entry.status, commented_from: entry.commented_from } : entry?.[field];
-      const left = value(a[id]);
-      const right = value(b[id]);
-      const before = value(ancestor[id]);
+    const item = { _timestamps: { ...a[id]?._timestamps, ...b[id]?._timestamps } };
+    const fields = new Set([...Object.keys(a[id] || {}), ...Object.keys(b[id] || {})]);
+    fields.delete('_timestamps');
+    for (const field of fields) {
+      if (!safeKey(field)) continue;
+      const left = a[id]?.[field];
+      const right = b[id]?.[field];
+      const before = ancestor[id]?.[field];
       const lt = a[id]?._timestamps?.[field] || EPOCH;
       const rt = b[id]?._timestamps?.[field] || EPOCH;
       let useLeft;
-      if (left === undefined) useLeft = false;
-      else if (right === undefined || equal(left, right)) useLeft = true;
+      if (equal(left, right)) useLeft = true;
       else if (equal(left, before)) useLeft = false;
       else if (equal(right, before)) useLeft = true;
-      else useLeft = stamp(lt) > stamp(rt) || (stamp(lt) === stamp(rt) && JSON.stringify(left) >= JSON.stringify(right));
+      else if (left === undefined) useLeft = false;
+      else if (right === undefined) useLeft = true;
+      else useLeft = stamp(lt) > stamp(rt) || (stamp(lt) === stamp(rt) && STATE_FIELDS.includes(field) && JSON.stringify(left) >= JSON.stringify(right));
       const selected = useLeft ? left : right;
       if (selected !== undefined) {
-        if (field === 'status') Object.assign(item, selected);
-        else item[field] = clone(selected);
-        item._timestamps[field] = equal(left, right) ? newest(lt, rt) : useLeft ? lt : rt;
+        item[field] = clone(selected);
+        if (STATE_FIELDS.includes(field) || a[id]?._timestamps?.[field] || b[id]?._timestamps?.[field]) {
+          item._timestamps[field] = equal(left, right) ? newest(lt, rt) : useLeft ? lt : rt;
+        }
       }
     }
     result[id] = item;
   }
   return result;
+}
+
+/** Conversion is not a user edit: re-convert the ancestor and fresh remote on every retry. */
+export function mergeMigratingState(local, remote, base, library, time) {
+  return mergeState(local, migrateState(remote, library, time).state, migrateState(base, library, time).state);
+}
+
+function normalizeQueue(input) {
+  if (input == null) return null;
+  if (!dictionary(input) || !Array.isArray(input.queue) || typeof input.arrivals_since !== 'string' ||
+      !Number.isFinite(Date.parse(input.arrivals_since))) throw new Error('Invalid reading queue: expected queue and arrivals_since.');
+  return clone(input);
 }
 
 function normalizeLibrary(input) {
@@ -233,14 +268,12 @@ function normalizeLibrary(input) {
     if (!safeKey(id) || ids.has(id) || slugs.has(slug)) throw new Error('Library article ids and slugs must be unique.');
     ids.add(id); slugs.add(slug);
     return {
-      ...entry, id, slug, title: typeof entry.title === 'string' && entry.title.trim() ? entry.title : slug,
+      ...libraryFields(entry), id, slug, title: typeof entry.title === 'string' && entry.title.trim() ? entry.title : slug,
       title_is_generated: Boolean(entry.title_is_generated), author: String(entry.author || ''), handle: String(entry.handle || ''),
       url: String(entry.url || ''), created_at: String(entry.created_at || ''), source_type: String(entry.source_type || ''),
       words: Number.isFinite(entry.words) ? entry.words : 0,
       tags: Array.isArray(entry.tags) ? entry.tags.filter(tag => typeof tag === 'string') : [],
-      summary: String(entry.summary || ''), images: Array.isArray(entry.images) ? entry.images : [],
-      status: STATUSES.has(entry.status) ? entry.status : 'unread', starred: Boolean(entry.starred),
-      status_changed_at: newest(entry.status_changed_at || entry.created_at),
+      images: Array.isArray(entry.images) ? entry.images : [],
     };
   });
 }
@@ -248,14 +281,11 @@ function normalizeLibrary(input) {
 function normalizeContent(path, content) {
   if (path === 'library.json') return normalizeLibrary(content);
   if (path === 'user/state.json') return normalizeState(content);
+  if (path === 'user/queue.json') return normalizeQueue(content);
   if (path.startsWith('user/notes/')) return normalizeNotes(content);
   if (path === 'bot/meta.json') {
     if (!dictionary(content)) throw new Error('bot/meta.json must contain an object.');
-    const lengths = {};
-    for (const [slug, length] of Object.entries(content.notes_summary_len || {})) {
-      if (safeKey(slug) && Number.isFinite(length) && length >= 0) lengths[slug] = length;
-    }
-    return { ...content, notes_summary_len: lengths };
+    return { ...content };
   }
   return content;
 }
@@ -277,10 +307,10 @@ function transactionResult(transaction) {
 function openCacheDatabase() {
   return new Promise((resolve, reject) => {
     if (!globalThis.indexedDB) return reject(new Error('IndexedDB is unavailable. Enable browser storage for offline reading.'));
-    const request = indexedDB.open(DATABASE, 1);
+    const request = indexedDB.open(DATABASE, 2);
     let failed = false;
     request.onupgradeneeded = () => {
-      for (const name of ['cache', 'queue']) {
+      for (const name of ['cache', 'queue', 'backups']) {
         if (!request.result.objectStoreNames.contains(name)) {
           request.result.createObjectStore(name, { keyPath: 'key' }).createIndex('namespace', 'namespace');
         }
@@ -364,7 +394,10 @@ export class ReadingStore extends EventTarget {
       const transaction = this._db.transaction(['cache', 'queue'], 'readonly');
       const [cache, queue] = await Promise.all(['cache', 'queue'].map(name => requestResult(transaction.objectStore(name).index('namespace').getAll(this.namespace))));
       if (this._disposed) return;
-      for (const record of cache) if (!this._cache.has(record.path)) this._cache.set(record.path, record);
+      for (const record of cache) if (!this._cache.has(record.path)) {
+        if (record.path === 'library.json') record.content = normalizeLibrary(record.content);
+        this._cache.set(record.path, record);
+      }
       for (const entry of queue) {
         if (!writablePath(entry.path)) continue;
         this._revision = Math.max(this._revision, entry.revision || 0);
@@ -388,11 +421,11 @@ export class ReadingStore extends EventTarget {
       }
     } catch (error) { this._error(new Error(`Could not read the device recovery journal: ${error.message}`)); }
     if (this.demo) {
-      const seeds = { 'library.json': demoLibrary, 'user/state.json': demoState, 'bot/meta.json': demoMeta };
+      const seeds = { 'library.json': demoLibrary, 'user/state.json': demoState, 'user/queue.json': demoQueue, 'bot/meta.json': demoMeta };
       for (const [slug, text] of Object.entries(demoArticles)) seeds[`articles/${slug}.md`] = text;
       for (const [slug, notes] of Object.entries(demoNotes)) seeds[`user/notes/${slug}.json`] = notes;
       for (const [slug, text] of Object.entries(demoSummaries)) seeds[`bot/summaries/${slug}.md`] = text;
-      for (const [path, content] of Object.entries(seeds)) if (!this._cache.has(path)) this._putCache(path, clone(content), null);
+      for (const [path, content] of Object.entries(seeds)) if (!this._cache.has(path)) this._putCache(path, normalizeContent(path, clone(content)), null, JSON.stringify(content));
     }
     for (const entry of this._queue.values()) this._putCache(entry.path, clone(entry.content), this._cache.get(entry.path)?.sha || null);
     if (this._db) {
@@ -402,11 +435,11 @@ export class ReadingStore extends EventTarget {
       for (const entry of this._queue.values()) transaction.objectStore('queue').put(entry);
       await done;
     }
-    if (this._queue.size) this._schedule();
   }
 
-  _putCache(path, content, sha) {
+  _putCache(path, content, sha, raw = this._cache.get(path)?.raw) {
     const record = { key: this._key(path), namespace: this.namespace, path, content, sha, fetched_at: new Date().toISOString() };
+    if (path === 'user/state.json' && typeof raw === 'string') record.raw = raw;
     this._assertActive();
     this._cache.set(path, record);
     this._versions.set(path, (this._versions.get(path) || 0) + 1);
@@ -448,18 +481,19 @@ export class ReadingStore extends EventTarget {
   }
 
   _schedule() {
-    if (this._disposed || this._locking) return;
+    if (this._disposed || this._locking || !this._initialized) return;
     clearTimeout(this._timer);
     this._timer = setTimeout(() => { this._timer = null; void this.flush(); }, 2000);
   }
 
-  _queueEdit(path, content) {
+  _queueEdit(path, content, options = {}) {
     this._assertOpen();
-    if (!writablePath(path)) throw new Error('Refusing to write outside user/state.json and user/notes/.');
+    if (!writablePath(path)) throw new Error('Refusing to write outside user/state.json, user/queue.json and user/notes/.');
     const old = this._queue.get(path);
     const cached = this._cache.get(path);
     const entry = {
       key: this._key(path), namespace: this.namespace, path,
+      migration: options.migration || old?.migration,
       content: clone(content), base: clone(old ? old.base : cached?.content ?? null), revision: ++this._revision,
     };
     this._queue.set(path, entry);
@@ -476,15 +510,58 @@ export class ReadingStore extends EventTarget {
     this._initPromise = (async () => {
       await this._ensureReady();
       this._assertOpen();
-      const [library, state, meta] = await Promise.all([
+      const [library, original, meta, existingQueue] = await Promise.all([
         this._freshOrCached('library.json'), this._freshOrCached('user/state.json', {}),
-        this._freshOrCached('bot/meta.json', { updated_at: null, notes_summary_len: {} }),
+        this._freshOrCached('bot/meta.json', { updated_at: null }), this._freshOrCached('user/queue.json', null),
       ]);
       this._assertOpen();
+      const time = this._now();
+      const { state, changed } = migrateState(original, library, time);
+      if (changed) {
+        const cached = this._cache.get('user/state.json');
+        await this._savePreV2Backup(cached?.raw ?? JSON.stringify(original));
+        await this._queueEdit('user/state.json', state, { migration: { time, library } });
+      }
+      const queue = existingQueue || { queue: [], arrivals_since: time };
+      if (!existingQueue) await this._queueEdit('user/queue.json', queue);
+      this._initialized = true;
+      if (this._queue.size) this._schedule();
       if (!this._lastError) this._emit(this._queue.size ? 'queued' : this.demo ? 'local' : 'synced', this.demo ? 'Demo · changes stay on this device.' : this._queue.size ? 'Local edits are waiting to sync.' : 'Private library ready.');
-      return { library: clone(library), state: clone(state), meta: clone(meta) };
+      return { library: clone(library), state: clone(state), meta: clone(meta), queue: clone(queue) };
     })();
     try { return await this._initPromise; } catch (error) { this._initPromise = null; throw error; }
+  }
+
+  async _savePreV2Backup(raw) {
+    await this._ensureReady();
+    this._assertOpen();
+    if (!this._db) throw new Error('Reading migration needs IndexedDB to retain your original state backup. Enable browser storage and reload; no migration was written.');
+    const transaction = this._db.transaction('backups', 'readwrite');
+    const done = transactionResult(transaction);
+    const backups = transaction.objectStore('backups');
+    const key = this._key('pre-v2-state');
+    const request = backups.get(key);
+    request.onsuccess = () => {
+      if (!request.result) backups.put({ key, namespace: this.namespace, raw });
+    };
+    await done;
+  }
+
+  async getPreV2Backup() {
+    await this._ensureReady();
+    this._assertOpen();
+    if (!this._db) return null;
+    const transaction = this._db.transaction('backups', 'readonly');
+    const record = await requestResult(transaction.objectStore('backups').get(this._key('pre-v2-state')));
+    return record?.raw ?? null;
+  }
+
+  _mergePending(entry, remote) {
+    if (entry.path === 'user/queue.json') return remote || entry.content;
+    if (entry.path !== 'user/state.json') return mergeNotes(entry.content, remote, entry.base);
+    return entry.migration
+      ? mergeMigratingState(entry.content, remote, entry.base, entry.migration.library, entry.migration.time)
+      : mergeState(entry.content, remote, entry.base);
   }
 
   _contentUrl(path) {
@@ -576,11 +653,11 @@ export class ReadingStore extends EventTarget {
       try { content = JSON.parse(text); } catch { throw new Error(`${path} is not valid JSON. No remote data was overwritten.`); }
       content = normalizeContent(path, content);
     }
-    return { content, sha: data.sha || null };
+    return { content, sha: data.sha || null, ...(path === 'user/state.json' ? { raw: text } : {}) };
   }
 
   _notify(path, previous, content) {
-    if (this._disposed || equal(previous, content)) return;
+    if (this._disposed || !this._initialized || equal(previous, content)) return;
     if (path.startsWith('user/notes/')) this.dispatchEvent(new CustomEvent('notes-updated', { detail: { slug: noteSlug(path), notes: clone(content) } }));
     else if (path === 'user/state.json') this.dispatchEvent(new CustomEvent('state-updated', { detail: { state: clone(content) } }));
     else if (path.startsWith('bot/summaries/')) this.dispatchEvent(new CustomEvent('summary-updated', { detail: { slug: path.slice('bot/summaries/'.length, -3), markdown: content } }));
@@ -600,10 +677,11 @@ export class ReadingStore extends EventTarget {
       if (!pending && version !== (this._versions.get(path) || 0)) return clone(previous);
       let content = remote.content;
       if (pending) {
-        content = path === 'user/state.json' ? mergeState(pending.content, remote.content, pending.base) : mergeNotes(pending.content, remote.content, pending.base);
-        this._queue.set(path, { ...pending, content: clone(content), base: clone(remote.content), revision: ++this._revision });
+        content = this._mergePending(pending, remote.content);
+        if (path === 'user/queue.json' && remote.content) this._queue.delete(path);
+        else this._queue.set(path, { ...pending, content: clone(content), base: clone(remote.content), revision: ++this._revision });
       }
-      this._putCache(path, content, remote.sha);
+      this._putCache(path, content, remote.sha, remote.raw);
       this._notify(path, previous, content);
       await this._persist(path);
       this._assertActive();
@@ -627,6 +705,8 @@ export class ReadingStore extends EventTarget {
       this._assertOpen();
       this._error(error);
       if (this._cache.has(path)) return clone(this._cache.get(path).content);
+      // Queue creation is create-only, so offline uncertainty cannot replace a remote queue.
+      if (path === 'user/queue.json' && fallback === null) return null;
       throw error;
     }
   }
@@ -697,16 +777,15 @@ export class ReadingStore extends EventTarget {
     const result = clone(previous);
     const time = this._now();
     for (const [id, entry] of Object.entries(incoming)) {
-      const next = { ...(previous[id] || {}), _timestamps: { ...previous[id]?._timestamps } };
+      const next = { ...(previous[id] || {}), ...entry, _timestamps: { ...previous[id]?._timestamps } };
       for (const field of STATE_FIELDS) if (entry[field] !== undefined) {
         next[field] = entry[field];
-        if (!equal(entry[field], previous[id]?.[field]) ||
-            (field === 'status' && entry.commented_from !== previous[id]?.commented_from)) next._timestamps[field] = time;
+        if (!equal(entry[field], previous[id]?.[field])) next._timestamps[field] = time;
       }
-      if (entry.status !== undefined) next.commented_from = entry.commented_from;
-      if (entry.status !== undefined && entry.status !== previous[id]?.status && entry.status_changed_at === previous[id]?.status_changed_at) {
-        next.status_changed_at = time;
-        next._timestamps.status_changed_at = time;
+      if (entry.progress !== undefined && entry.progress !== previous[id]?.progress &&
+          (entry.progress_changed_at === undefined || entry.progress_changed_at === previous[id]?.progress_changed_at)) {
+        next.progress_changed_at = time;
+        next._timestamps.progress_changed_at = time;
       }
       result[id] = next;
     }
@@ -718,6 +797,7 @@ export class ReadingStore extends EventTarget {
     const path = `user/notes/${safeSlug(slug)}.json`;
     const previous = normalizeNotes(this._cache.get(path)?.content);
     const incoming = normalizeNotes({ ...previous, ...notes });
+    incoming.links = mergeLinks(previous.links, incoming.links);
     const time = this._now();
     incoming.deleted_highlights = { ...previous.deleted_highlights, ...incoming.deleted_highlights };
     const old = new Map(previous.highlights.map(highlight => [highlight.id, highlight]));
@@ -737,9 +817,10 @@ export class ReadingStore extends EventTarget {
   }
 
   async _putRemote(path, content, sha) {
-    if (!writablePath(path)) throw new Error('Refusing to write outside user/state.json and user/notes/.');
+    if (!writablePath(path)) throw new Error('Refusing to write outside user/state.json, user/queue.json and user/notes/.');
+    if (path === 'user/queue.json' && sha) throw new Error('The reading queue can only be created, never overwritten.');
     await this._checkRepository();
-    const body = { message: `Update reading ${path === 'user/state.json' ? 'state' : 'notes'}`, content: utf8Base64(`${JSON.stringify(content, null, 2)}\n`), branch: this.settings.branch };
+    const body = { message: `Update reading ${path === 'user/state.json' ? 'state' : path === 'user/queue.json' ? 'queue' : 'notes'}`, content: utf8Base64(`${JSON.stringify(content, null, 2)}\n`), branch: this.settings.branch };
     if (sha) body.sha = sha;
     const result = await this._request(this._contentUrl(path), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     return result.content?.sha || null;
@@ -750,10 +831,12 @@ export class ReadingStore extends EventTarget {
     let sent;
     let sha;
     for (let attempt = 0; attempt < 4; attempt += 1) {
-      const fallback = path === 'user/state.json' ? {} : emptyNotes();
+      const fallback = path === 'user/state.json' ? {} : path === 'user/queue.json' ? null : emptyNotes();
       const remote = await this._fetchRemote(path, fallback);
       this._assertActive();
-      sent = path === 'user/state.json' ? mergeState(snapshot.content, remote.content, snapshot.base) : mergeNotes(snapshot.content, remote.content, snapshot.base);
+      sent = this._mergePending(snapshot, remote.content);
+      if (path === 'user/queue.json' && remote.content) { sha = remote.sha; break; }
+      if (equal(sent, remote.content)) { sha = remote.sha; break; }
       try { sha = await this._putRemote(path, sent, remote.sha); break; }
       catch (error) {
         if (![409, 422].includes(error.status)) throw error;
@@ -764,10 +847,10 @@ export class ReadingStore extends EventTarget {
     const current = this._queue.get(path);
     const previous = this._cache.get(path)?.content;
     let content = sent;
-    if (current && current.revision !== snapshot.revision) {
+    if (path !== 'user/queue.json' && current && current.revision !== snapshot.revision) {
       // Rebase edits made while GET/PUT was in flight onto what actually reached GitHub.
       content = path === 'user/state.json' ? mergeState(current.content, sent, snapshot.content) : mergeNotes(current.content, sent, snapshot.content);
-      this._queue.set(path, { ...current, content: clone(content), base: clone(sent), revision: ++this._revision });
+      this._queue.set(path, { ...current, migration: undefined, content: clone(content), base: clone(sent), revision: ++this._revision });
     } else this._queue.delete(path);
     this._putCache(path, clone(content), sha);
     this._notify(path, previous, content);
@@ -776,6 +859,11 @@ export class ReadingStore extends EventTarget {
 
   async flush() {
     if (this._disposed) return { pending: 0 };
+    // Never flush legacy recovery entries before init has backed up and migrated them.
+    if (!this._initialized) {
+      if (this._initPromise) await this._initPromise;
+      else return { pending: this._queue.size };
+    }
     clearTimeout(this._timer);
     this._timer = null;
     if (this._flushPromise) return this._flushPromise;
@@ -835,6 +923,18 @@ export class ReadingStore extends EventTarget {
     return files.filter(file => file.type === 'file' && typeof file.name === 'string' && file.name.endsWith('.json')).map(file => safeSlug(file.name.slice(0, -5)));
   }
 
+  async getNoteSlugs() {
+    await this._ensureReady();
+    this._assertOpen();
+    const slugs = new Set([...this._cache.keys()].filter(path => path.startsWith('user/notes/')).map(noteSlug));
+    if (!this.demo) {
+      try { for (const slug of await this._remoteNoteSlugs()) slugs.add(slug); }
+      catch (error) { this._error(error); }
+    }
+    this._assertOpen();
+    return [...slugs].sort();
+  }
+
   async exportData() {
     this._assertOpen();
     await this._ensureReady();
@@ -851,6 +951,7 @@ export class ReadingStore extends EventTarget {
       catch (error) { warnings.push(`${slug}: ${error.message}`); }
     }
     try { await this._freshOrCached('user/state.json', {}); } catch (error) { warnings.push(error.message); }
+    try { await this._freshOrCached('user/queue.json', null); } catch (error) { warnings.push(error.message); }
     this._assertOpen();
     const notes = {};
     for (const [path, record] of this._cache) if (path.startsWith('user/notes/')) notes[noteSlug(path)] = clone(record.content);
@@ -858,7 +959,7 @@ export class ReadingStore extends EventTarget {
     return {
       format: 'reading-terminal-user-data', version: 1, exported_at: new Date().toISOString(), complete: warnings.length === 0,
       source: { owner: this.demo ? '' : this.settings.owner, repo: this.demo ? '' : this.settings.repo, branch: this.demo ? '' : this.settings.branch, demo: this.demo },
-      state: clone(this._cache.get('user/state.json')?.content || {}), notes, warnings,
+      state: clone(this._cache.get('user/state.json')?.content || {}), queue: clone(this._cache.get('user/queue.json')?.content || null), notes, warnings,
     };
   }
 
@@ -866,13 +967,15 @@ export class ReadingStore extends EventTarget {
     this._assertOpen();
     if (!dictionary(data) || (data.format && data.format !== 'reading-terminal-user-data') || (data.version && data.version !== 1) ||
         !dictionary(data.state) || !dictionary(data.notes)) throw new Error('Choose a Reading Terminal user-data JSON backup containing state and notes.');
-    const state = normalizeState(data.state);
+    const state = normalizeState(migrateState(data.state, [], this._now()).state);
+    const queue = normalizeQueue(data.queue);
     const incoming = Object.entries(data.notes).map(([slug, notes]) => [safeSlug(slug), normalizeNotes(notes)]);
     await this._ensureReady();
     this._assertOpen();
     // Validate the complete backup before making any changes, then merge through the normal durable queue.
     const mergedState = mergeState(this._cache.get('user/state.json')?.content || {}, state);
     await this.saveState(mergedState);
+    if (queue && !await this._freshOrCached('user/queue.json', null)) await this._queueEdit('user/queue.json', queue);
     for (const [slug, notes] of incoming) {
       const path = `user/notes/${slug}.json`;
       let current = this._cache.get(path)?.content;
