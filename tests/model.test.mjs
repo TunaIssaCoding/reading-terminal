@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { effectiveState, migrateState, libraryFields, splitArrivals } from '../js/model.js';
+import { effectiveState, migrateState, libraryFields, splitArrivals, pickUnread } from '../js/model.js';
 import { mergeState, mergeMigratingState, mergeNotes } from '../js/store.js';
 
 const time = '2026-06-15T12:00:00.000Z';
@@ -244,4 +244,13 @@ test('keeping a previously hidden link clears only its hidden membership across 
   const merged = mergeNotes(local, remote, base);
   assert.deepEqual(merged.links.map(link => link.slug), ['known', 'remote']);
   assert.deepEqual(merged.hidden_links, ['other', 'remote-hidden']);
+});
+
+test('feeling lucky picks only unread articles and never the open one', () => {
+  const items = [{ id: 'a', progress: 'new' }, { id: 'b', progress: 'finished' }, { id: 'c', progress: 'new' }, { id: 'd', progress: 'reading' }, { id: 'e', progress: 'let_go' }];
+  assert.equal(pickUnread(items, null, () => 0).id, 'a');
+  assert.equal(pickUnread(items, null, () => 0.99).id, 'c');
+  assert.equal(pickUnread(items, 'a', () => 0.5).id, 'c');
+  assert.equal(pickUnread([{ id: 'b', progress: 'finished' }, { id: 'd', progress: 'reading' }]), null);
+  assert.equal(pickUnread([{ id: 'a', progress: 'new' }], 'a'), null);
 });

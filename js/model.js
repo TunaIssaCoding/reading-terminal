@@ -87,3 +87,9 @@ export function splitArrivals(items, state = {}, arrivals_since) {
   }
   return { arrivals, pile };
 }
+
+/** Feeling lucky: a random article you haven't started (progress New), never the one already open. */
+export function pickUnread(items, excludeId = null, random = Math.random) {
+  const pool = items.filter(item => item.progress === 'new' && String(item.id) !== String(excludeId));
+  return pool.length ? pool[Math.floor(random() * pool.length)] : null;
+}

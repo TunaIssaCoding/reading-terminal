@@ -5,7 +5,7 @@ import { Reader } from './reader.js';
 import { VaultAccess } from './auth.js';
 import { BotBox } from './bot.js';
 import { createAutoFinish } from './progress.js';
-import { effectiveState, libraryFields } from './model.js';
+import { effectiveState, libraryFields, pickUnread } from './model.js';
 import { connectionDecision, undoConnection } from './connections.js';
 
 const $ = selector => document.querySelector(selector);
@@ -108,7 +108,9 @@ function items() {
     ...effectiveState(item, state[item.id]), notes: notesCache.get(item.slug) }));
 }
 function renderLibrary() {
-  library.render(items(), { activeId: active?.id, query, tag, starredOnly, progress: progressFilter,
+  const projected = items();
+  $('#lucky-button').disabled = !projected.some(item => item.progress === 'new');
+  library.render(projected, { activeId: active?.id, query, tag, starredOnly, progress: progressFilter,
     withNotes, shortOnly, source: sourceFilter, bodies: new Map([...searchIndex, ...bodies]) });
   $('#library-total').textContent = `${libraryItems.length} items`;
   $('#tag-filter').hidden = !tag; $('#tag-filter').textContent = `${tag} ×`;
@@ -465,6 +467,11 @@ $('#short-filter').addEventListener('click', () => { shortOnly = !shortOnly; ren
 $('#progress-filter').addEventListener('change', e => { progressFilter = e.target.value; renderLibrary(); });
 $('#source-filter').addEventListener('change', e => { sourceFilter = e.target.value; renderLibrary(); });
 $('#tag-filter').addEventListener('click', () => { tag = ''; renderLibrary(); });
+$('#lucky-button').addEventListener('click', () => {
+  const pick = pickUnread(items(), active?.id);
+  if (pick) void openArticle(pick.id);
+  else notify('Nothing unread left.');
+});
 $('#read-toggle').addEventListener('click', toggleRead);
 $('#reader-star').addEventListener('click', () => toggleStar());
 $('#let-go').addEventListener('click', () => { $('#reader-more').open = false; chooseProgress(active?.id, 'let_go'); });

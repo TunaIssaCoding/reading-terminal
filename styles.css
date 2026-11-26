@@ -69,6 +69,7 @@ body.auth-blocked>.topbar,body.auth-blocked>.workspace,body.auth-blocked>#drawer
 /* The library scrolls as one column beside the reader and notes. */
 #library-scroll{flex:1;min-height:0;overflow:auto}
 #library{overflow:visible}
+#lucky-button{display:block;width:100%;margin-top:12px;padding:7px 9px;font-size:11px;color:var(--accent)}#lucky-button:disabled{color:var(--quiet);cursor:default}
 @media(max-width:1100px) and (min-width:861px){.topbar{gap:5px;padding:0 10px}.topbar>.wordmark{font-size:12px}.topbar>#sync-status{max-width:16vw}}
 @media(max-width:860px){.topbar{z-index:40}}
 .connection-missing,.connection-hidden{display:inline-block;color:var(--muted);font-size:12px;margin-left:8px}
