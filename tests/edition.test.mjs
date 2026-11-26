@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { localDate, parseEdition, editionMinutes, editionDone, findMargin, setStillAgree, undoStillAgree } from '../js/edition.js';
-import { defaultView, effectiveState, libraryFields } from '../js/model.js';
+import { effectiveState, libraryFields } from '../js/model.js';
 import { ReadingStore, mergeNotes } from '../js/store.js';
 import { demoEdition, demoLibrary, demoNotes, demoState } from '../js/demo.js';
 
@@ -87,13 +87,6 @@ test('the edition filename date follows device time on both sides of UTC midnigh
   process.env.TZ = 'Asia/Tokyo';
   assert.equal(localDate(new Date('2026-11-20T20:00:00Z')), '2026-11-21');
   assert.equal(localDate(new Date(2026, 0, 2, 12)), '2026-01-02');
-});
-
-test('edition default takes priority without changing the no-edition mode order', () => {
-  for (const [queued, arrivals, expected] of [[['long'], ['arrival'], 'queue'], [[], ['arrival'], 'arrivals'], [[], [], 'library']]) {
-    assert.equal(defaultView(queued, arrivals), expected);
-    assert.equal(defaultView(queued, arrivals, { picks: [] }), 'edition');
-  }
 });
 
 test('total minutes uses explicit minutes, word-count rounding and the missing-metadata fallback', () => {

@@ -83,9 +83,6 @@
     </div>
   </section>
   <header class="topbar">
-    <button id="edition-mode" class="text-button" data-mode="edition" hidden>Edition</button>
-    <button id="arrivals-mode" class="text-button" data-mode="arrivals">Arrivals (0)</button>
-    <button id="queue-mode" class="text-button" data-mode="queue">Up next (0/10)</button>
     <button id="library-toggle" class="text-button" aria-label="Toggle library" aria-controls="sidebar" aria-expanded="true">Library</button>
     <a class="wordmark" href="#">reading<span>terminal</span><span class="cursor-mark" aria-hidden="true">_</span></a>
     <span id="mode-badge" class="badge">DEMO</span>
@@ -107,16 +104,8 @@
       </div>
     </div>
   </header>
-  <nav id="mobile-modes" aria-label="Reading modes">
-    <button data-mode="edition" hidden>Edition</button>
-    <button data-mode="arrivals">Arrivals (0)</button>
-    <button data-mode="queue">Up next (0/10)</button>
-    <button data-mode="library">Library</button>
-  </nav>
   <div class="workspace">
     <aside id="sidebar" aria-label="Reading library">
-      <section id="edition-content" class="edition-view" tabindex="-1" aria-label="Today's edition" hidden></section>
-      <section id="mode-content" tabindex="-1" aria-label="Reading decisions" hidden></section>
       <div class="library-tools">
         <div class="section-eyebrow">YOUR LIBRARY <span id="library-total">0 items</span></div>
         <label class="search-box"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="Search your reading…" aria-label="Search title, tags, author and body"><kbd>/</kbd></label>
@@ -131,7 +120,6 @@
         <span id="search-status" role="status"></span>
       </div>
       <div id="library-scroll">
-        <section id="shelves" aria-label="Library shelves"></section>
         <nav id="library" aria-label="Articles" data-density="compact"></nav>
       </div>
       <footer class="sidebar-footer"><span>A little attention, every day.</span><span><kbd>j</kbd> <kbd>k</kbd> navigate · <kbd>↵</kbd> open</span></footer>
@@ -145,7 +133,6 @@
           <button id="reader-star" aria-label="Add Keeper — worth coming back to" title="Worth coming back to" aria-pressed="false" hidden disabled>★ Keeper · s</button>
           <details id="reader-more" hidden><summary aria-label="Article options">⋯</summary><div class="reader-menu">
             <button id="let-go">Let go</button>
-            <button id="up-next">Add to Up next</button>
             <a id="open-pdf" target="_blank" rel="noopener noreferrer" hidden>Open PDF</a>
             <a id="open-source" target="_blank" rel="noopener noreferrer" hidden>Open source</a>
           </div></details>
@@ -157,7 +144,7 @@
       <section id="bot-box" hidden></section>
       <footer class="reader-footer"><span>SELECT A PASSAGE, THEN <kbd>h</kbd> TO THINK IN THE MARGINS</span><span id="reading-progress">0%</span></footer>
     </main>
-    <div id="notes-resizer" role="separator" aria-label="Resize notes pane" aria-orientation="vertical" tabindex="0" aria-valuemin="22" aria-valuemax="50" aria-valuenow="30"></div>
+    <div id="notes-resizer" role="separator" aria-label="Resize notes pane" aria-orientation="vertical" tabindex="0" aria-valuemin="22" aria-valuemax="55" aria-valuenow="40"></div>
     <aside id="notes-pane" aria-label="Your notes"><div class="notes-topline"><span>Your notes</span><span>PRIVATE NOTES <button id="notes-close" aria-label="Close notes drawer">×</button></span></div><div id="notes-content"></div></aside>
   </div>
   <button id="drawer-backdrop" aria-label="Close drawer" hidden></button>
@@ -214,12 +201,8 @@
   <dialog id="help-dialog" aria-labelledby="help-title">
     <header class="dialog-header"><div><span class="section-eyebrow">LESS REACHING, MORE READING</span><h2 id="help-title">Keyboard shortcuts</h2></div><button data-close aria-label="Close shortcuts">×</button></header>
     <dl class="shortcut-list">
-      <dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>Next / previous item (K keeps a triage card)</dd>
-      <dt><kbd>Enter</kbd></dt><dd>Read the focused item</dd>
-      <dt><kbd>U</kbd> / <kbd>K</kbd> / <kbd>L</kbd></dt><dd>Triage: Up next / Keep in library / Let go</dd>
-      <dt><kbd>←</kbd> / <kbd>→</kbd></dt><dd>Previous / next triage card</dd>
-      <dt><kbd>x</kbd></dt><dd>Remove selected Up next item; keep it in Library</dd>
-      <dt><kbd>Alt</kbd> + <kbd>↑</kbd> / <kbd>↓</kbd></dt><dd>Reorder selected Up next item</dd>
+      <dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>Next / previous article in the library</dd>
+      <dt><kbd>Enter</kbd></dt><dd>Read the focused article</dd>
       <dt><kbd>r</kbd></dt><dd>Toggle Finished / Reading</dd>
       <dt><kbd>s</kbd></dt><dd>Toggle Keeper</dd>
       <dt><kbd>h</kbd></dt><dd>Highlight selected source text</dd>
@@ -228,7 +211,7 @@
       <dt><kbd>Esc</kbd></dt><dd>Close an overlay, menu or reader</dd>
       <dt><kbd>?</kbd></dt><dd>Open this guide</dd>
     </dl>
-    <p>Shortcuts stay quiet while you are typing. Decisions offer Undo for six seconds. Notes and highlights are saved locally first, then synced to your private repository.</p>
+    <p>Shortcuts stay quiet while you are typing. Automatic changes offer Undo for six seconds. Notes and highlights are saved locally first, then synced to your private repository.</p>
   </dialog>
 </body>
 </html>

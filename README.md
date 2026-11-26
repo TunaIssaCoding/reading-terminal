@@ -1,6 +1,8 @@
 # Reading Terminal
 
-A static, local-first reading workspace. No build step, framework, backend, analytics, or third-party scripts. Unlock your private library with a passkey, with your own password as backup. **Explore the demo** uses 42 fictional records whose edits stay on that device and never touch GitHub. Loading `#demo` skips vault/token loading and opens **Edition**, with a hand-made selection dated at demo startup. Demo links retain `#demo&article=…` and the isolated `demo:v2` namespace. Demo startup removes legacy `demo:v1` IndexedDB records and localStorage keys, including the pending journal, without touching real-library namespaces. Decisions saved in `demo:v2` are preserved. Normal opening selects today's Edition when available, otherwise Up next when nonempty, Arrivals when nonempty, then Library. No article opens implicitly; an `#article=` link still opens its article.
+A static, local-first reading workspace. No build step, framework, backend, analytics, or third-party scripts. Unlock your private library with a passkey, with your own password as backup. **Explore the demo** uses 42 fictional records whose edits stay on that device and never touch GitHub; demo links use `#demo&article=…` and the isolated `demo:v2` namespace, and demo startup removes legacy `demo:v1` records. Opening the app reopens the article you were last reading; an `#article=` link opens that article instead.
+
+**26 Nov 2026:** Edition, Arrivals (triage), Up next and the library shelves were removed. The layout is the library (narrowest) beside the reader and notes, which share the remaining width equally.
 
 ## Publish the app
 
@@ -49,7 +51,7 @@ user/state.json
 user/queue.json
 user/notes/<slug>.json
 bot/summaries/<slug>.md
-bot/editions/YYYY-MM-DD.json  # optional daily edition, device-local date
+bot/editions/YYYY-MM-DD.json  # not shown by the app since 26 Nov 2026
 bot/meta.json
 ```
 
@@ -99,7 +101,7 @@ Full text gives complete body search; a truncated excerpt (for example, the firs
 
 `user/state.json` maps article **id** to `{progress, position, starred, triaged_at, progress_changed_at, last_opened_at, _timestamps}`. `progress` is `new`, `reading`, `finished`, or `let_go`; `position` is a 0–1 scroll fraction. `starred` is displayed as **★ Keeper** (“worth coming back to”), independently of progress. `_timestamps` preserves per-field conflict merging. Untriaged/unopened timestamps can be `null`. Has notes is never stored: it is derived from nonblank long notes or highlight note text in the notes file.
 
-`user/queue.json` is app-owned: `{ "queue": ["article-id"], "arrivals_since": "<ISO>" }`. Up next is ordered and capped at ten. Queue edits use the same local durability, recovery journal and SHA retries as other user files. Migration still only creates a missing queue. An eleventh addition shows **“Up next is full. Finish or remove one first.”** without changing state or queue. Listen remains parked.
+`user/queue.json` (the old Up next queue) is no longer edited by the interface. The store still reads and merges an existing file, so devices on an older version keep syncing; nothing new is added to it.
 
 ### One-time v2 migration
 
@@ -142,14 +144,11 @@ The app may add a highlight `start` offset, optional `still_agree_at` local cale
 
 The bot owns `library.json`, `articles/*`, `assets/*`, optional `search-index.json`, `bot/summaries/<slug>.md`, `bot/editions/<YYYY-MM-DD>.json`, and `bot/meta.json`. The reading store **only PUTs `user/state.json`, `user/queue.json`, and `user/notes/<slug>.json`**. Bot summaries are fetched lazily when an article opens; a missing summary is normal. Front matter can provide `summary_by`, `date` or `updated_at`, `notes_updated_at`, `connections_by`, and a `connections` YAML-like list of `{slug, title, why}`. The body can contain `## About your notes` and a `## Connections` markdown list. Article links can use `[Title](article:other-slug)`, `[Title](articles/other-slug.md)`, `[Title](#article=other-slug)`, or `[[other-slug|Title]]`.
 
-Editions contain `date`, `generated_at`, `bot`, `picks: [{slot, slug, why}]` in long/short/archive slots, optional `margin: {slug, highlight_id, why}`, and `arrivals: [slug]`. The app lazily reads only today's device-local filename through its repository cache, rechecks on successful sync and local-date changes, and never generates or writes editions. Missing files are normal; bad JSON hides the tab, while invalid sections or unknown slugs are skipped with one console warning per malformed fetch. Missing attribution uses **Reading bot**.
+Editions (`bot/editions/`) are no longer displayed or requested by the app. The store's parser remains for older cached data.
 
 ## Reading and writing
 
-- **Edition:** date, piece count, total minutes and “Proposed by” the file's writer and local generation time. Long/short/archive picks show source, minutes, progress and dashed bot reasons; click/Enter opens, j/k moves. “From your margins” appears only when its highlight exists: **Still agree** records today's date with six-second Undo; **Revise it** opens long notes with an unsaved blockquote at the end. Esc cancels an untouched draft; the first substantive edit saves it. Edition arrivals reuse Up next/Let go, triage timestamps, the ten-item cap and Undo, and disappear once triaged. All picks Finished or Let go shows **“You're done for today.”** with Up next/Library links; zero picks is not completion. The Edition tab is hidden when today's file is unavailable. No additional mode-switch shortcut is assigned.
-- **Arrivals:** untriaged records added at or after `arrivals_since` (`created_at` fallback), one card at a time. Cards show intake metadata, title, author, summary and lede; missing ledes are fetched lazily from the first 300 characters of plain body text. **U** adds to Up next, **K** keeps in Library, **L** lets go, **Enter** reads now, and **←/→** browse without a write. U/K keep progress New; all decisions stamp `triaged_at` and offer six-second Undo. “Keep” means triaged, not ★ Keeper.
-- **Up next:** drag the handle with mouse or touch, or use **Alt+↑/↓** on the selected row. **x** removes it while retaining it as triaged in Library. Enter opens it. The reader's ⋯ menu also adds to Up next. Finishing or letting go removes queue membership; progress Undo restores it.
-- **Shelves:** Started, not finished; Keepers to revisit (last opened strictly more than 60 days ago, or never); Under 10 minutes (≤10 and New); and The pile (older than the arrivals boundary, New and untriaged). Each has its rule, count and three previews. Collapse preferences are device-local per repository namespace. **Triage 20** selects a fixed batch of the oldest twenty pile records, without refilling the batch as decisions are made. The footer counts **Pile this week: A → B**, with B the current pile and A = B plus pre-boundary records triaged since Monday 00:00 local.
+- **Library:** one list grouped by progress (New, Reading, Finished, Let go), each group newest first, with search and filters for progress, Keepers, notes, length and source.
 - **Library:** New / Reading / Finished / Let go groups, newest added first. Filters: Progress, ★ Keepers, ✎ With notes, ≤ 10 min, and Source (from `source_label`). **With notes · most recent** sorts globally by the notes file's `updated_at`, not summary length. Rows show one full domain chip, source label, minutes, a `✎ n` badge (annotated highlights + one for long notes), and a thin Reading progress bar. Click a domain to filter. **⋯ → View** contains Compact / Comfortable density and theme controls.
 - **Navigation:** opening an article from the list, keyboard or internal link adds browser history. Back and Forward restore the article without adding another entry; initial restoration replaces the current entry.
 - **Progress:** opening New sets Reading and saves `last_opened_at`; other progress is preserved on open. Reaching 90% marks Reading as Finished and shows **Marked finished · Undo** for six seconds. Undo returns to Reading and cannot immediately re-trigger until scrolling below 90%. `r` toggles Finished / Reading with Undo. **Let go** is in the reader's ⋯ menu with Undo. Notes never change progress. Keeper is independent. The reader header shows progress and percentage while Reading; ⋯ also holds Open PDF and Open source. With no article, article actions are hidden and `r`/`s` do nothing.
@@ -157,20 +156,16 @@ Editions contain `date`, `generated_at`, `bot`, `picks: [{slot, slug, why}]` in 
 - **Long notes:** write markdown in the right pane, normally exactly 30% of the viewport. The editor grows and shrinks with its content; the pane, not the editor, scrolls. Drag its left edge or focus the separator and press arrow keys to resize. Drag highlighted text (including an existing text selection) onto the notes area to append a block quote after one empty line. The highlight's `↗` action and each margin entry's Send button provide keyboard/touch alternatives.
 - **Your notes:** long markdown notes → reading-order highlights (click a quote to jump) → kept links. Kept links resolve current library titles and open on click/Enter; missing articles are labelled “not in your library.” **Remove** offers six-second Undo. No bot content appears in this pane. Article source lines use approximately 1.6 line height; only a note/editor opens extra space underneath its line. The intake summary remains labelled **Summary · from intake**.
 - **End-of-article bot box:** dashed, attributed to `summary_by` and its date, or **Reading bot** when no author is supplied. “About your notes” uses the safe markdown renderer. Connections are headed “Suggested by” their `connections_by`, with titles resolved from the library. Unknown articles are marked “not in your library” and cannot be kept. **Keep link** saves `{slug, title}` in `links[]`, removes that slug from `hidden_links[]`, and displays **Kept ✓** plus **Unkeep**. **Hide** saves a slug in `hidden_links[]`; the small **Show hidden (n)** control reveals hidden suggestions without rewriting decisions. Keep, Unkeep and Hide offer six-second Undo; both arrays remain deduplicated. If notes are newer than `notes_updated_at`, the box says “Your notes changed since this was written.” The app never edits bot files.
-- **Top bar:** Edition (when available), Arrivals (n), Up next (n/10) and Library stay left; successful private sync shows relative age and an exact local-time tooltip, refreshed every 15 seconds. Queued/error states remain explicit; demo saves are labelled local, not synced. Lock and **⋯ → View / Settings / Help** are on the right.
-- **Mobile:** the top bar keeps Library, the title, Notes and ⋯; sync, the private/demo badge and Lock move into ⋯. A compact mode strip below it gives one-tap Edition / Arrivals / Up next / Library access. Library and Notes open slide-over drawers. Tap outside or press Esc outside an editor to close. Queue handles support touch pointer dragging without disabling normal list scrolling.
+- **Top bar:** the Library toggle and wordmark sit left; successful private sync shows relative age and an exact local-time tooltip, refreshed every 15 seconds. Queued/error states remain explicit; demo saves are labelled local, not synced. Lock and **⋯ → View / Settings / Help** are on the right.
+- **Mobile:** the top bar keeps Library, the title, Notes and ⋯; sync, the private/demo badge and Lock move into ⋯. Library and Notes open slide-over drawers. Tap outside or press Esc outside an editor to close.
 - **Settings:** Security first, then Backup, then Connection. **Advanced: connect with a token** is last and collapsed whenever Settings opens. Feedback uses one toast system; overlapping Undo actions each retain their own six-second window.
 
 ### Keyboard
 
 | Key | Action |
 | --- | --- |
-| `j` / `k` | Focus next / previous list item; in triage K keeps the card |
+| `j` / `k` | Focus next / previous article in the library |
 | `Enter` | Open focused item |
-| `U` / `K` / `L` | Triage: Up next / Keep in library / Let go |
-| `←` / `→` | Previous / next triage card |
-| `x` | Remove selected Up next item, keeping it in Library |
-| `Alt+↑` / `Alt+↓` | Reorder selected Up next item |
 | `r` | Toggle Finished / Reading |
 | `s` | Toggle current article's Keeper |
 | `h` | Highlight source selection |
@@ -189,9 +184,8 @@ Article opens are state edits: they save `last_opened_at` and move New to Readin
 
 Private caches are separated by owner/repository/branch. SHA conflicts trigger a fresh read and a bounded retry. Highlights merge by id and update timestamp; deletion tombstones prevent resurrection. State merges by field. Concurrent differing long-note edits preserve **both** versions with a visible conflict marker, newer first; resolve the marker by editing the long notes. Failed writes remain queued and are surfaced in the top bar, rather than being silently treated as synced. GitHub permissions, expired tokens and rate limits can prevent sync; fix settings or reconnect and retain a backup.
 
-Queue merging is three-way: an uncontested local reorder is retained. On concurrent changes, **keep remote order, append local additions absent remotely, apply local removals relative to the saved base**. A remote removal is not resurrected by an unchanged local copy. The remote `arrivals_since` and unrelated metadata survive. If concurrent additions would exceed ten, the first ten in this remote-priority order win; the appended local overflow stays in Library. Edits made during a PUT are rebased and flushed afterward.
+The store still merges an existing `user/queue.json` three-way (remote order, local additions appended, local removals applied against the saved base) so older devices keep syncing; the interface no longer edits it.
 
-Triage Undo restores the decision's prior state values, retaining unrelated Keeper/notes edits. Queue-changing Undo restores its original queue snapshot, including order; later queue edits within that six-second window are rolled back by that snapshot. A newer decision on the same item's owned fields supersedes its earlier Undo. Non-queue decisions do not roll back queue edits.
 
 Settings → **Export backup** downloads all available user state, queue and notes, without your token or article bodies. Export online to retrieve uncached and orphaned remote notes. If remote enumeration or retrieval fails, the download is visibly named **PARTIAL**, the JSON includes `complete: false` and warnings, and Settings tells you to reconnect and export again. **Import backup** merges through the same save/sync pipeline; an existing remote queue is never replaced. **Export pre-v2 backup** separately exports the retained original state JSON, not a full user-data backup. Keep backups private and secure.
 
@@ -206,4 +200,4 @@ node --test site/tests/
 python3 site/tests/smoke.py http://localhost:8808
 ```
 
-The URL argument is optional (`READING_BASE_URL`, otherwise `http://localhost:8808`). Use `localhost`, not `127.0.0.1`, so WebAuthn has a valid RP id. The harness exercises Edition (including local-midnight refresh), connection decisions, the reader, store, setup/unlock/remember/Lock, security conflicts and a CDP virtual authenticator configured with `hasPrf: true`, `ctap2_1`, and `internal`. Passkey registration, encrypted vault commit, Lock and PRF unlock must succeed; an unsupported fallback fails the scenario. This does not verify physical authenticators. The harness captures uncaught exceptions and rejects unexpected network requests; no real token or repository is used and no result files are generated. Crypto unit tests use Node 20+ WebCrypto; package metadata only selects ES modules and the directory test entrypoint, not a build step.
+The URL argument is optional (`READING_BASE_URL`, otherwise `http://localhost:8808`). Use `localhost`, not `127.0.0.1`, so WebAuthn has a valid RP id. **Note (26 Nov 2026):** the harness still contains Edition, triage and Up next scenarios; remove them before running it. The remaining scenarios exercise connection decisions, the reader, store, setup/unlock/remember/Lock, security conflicts and a CDP virtual authenticator configured with `hasPrf: true`, `ctap2_1`, and `internal`. This does not verify physical authenticators. No real token or repository is used. Crypto unit tests use Node 20+ WebCrypto; package metadata only selects ES modules and the directory test entrypoint, not a build step.

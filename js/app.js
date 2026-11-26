@@ -1,15 +1,11 @@
 import { ReadingStore, getSettings, saveSettings } from './store.js';
-import { Library } from './library.js';
+import { Library, tagLabel } from './library.js';
 import { NotesPane } from './notes.js';
 import { Reader } from './reader.js';
 import { VaultAccess } from './auth.js';
 import { BotBox } from './bot.js';
 import { createAutoFinish } from './progress.js';
-import { effectiveState, libraryFields, splitArrivals, defaultView } from './model.js';
-import { ModeViews } from './modes.js';
-import { triageDecision, undoDecision } from './triage.js';
-import { localDate, findMargin, setStillAgree, undoStillAgree } from './edition.js';
-import { EditionView } from './edition-view.js';
+import { effectiveState, libraryFields } from './model.js';
 import { connectionDecision, undoConnection } from './connections.js';
 
 const $ = selector => document.querySelector(selector);
@@ -24,8 +20,6 @@ const text = (tag, value, className) => {
 let store, libraryItems = [], state = {}, active = null, notes = emptyNotes(), bot = '';
 let openVersion = 0, connectionVersion = 0, query = '', tag = '', starredOnly = false, searchVersion = 0;
 let progressFilter = '', withNotes = false, shortOnly = false, sourceFilter = '';
-let mode = 'library', queue = { queue: [], arrivals_since: '' };
-let edition = null, editionDate = '', editionRequest = null;
 let positionTimer = null, pendingPosition = null, lastPositionSave = 0;
 let articleReady = false;
 let bodies = new Map(), searchIndex = new Map(), notesCache = new Map(), summaries = new Map();
@@ -60,12 +54,6 @@ function notify(message, { undo, commit } = {}) {
 function handleError(error) { notify(error.message || String(error)); }
 const persist = promise => Promise.resolve(promise).catch(handleError);
 const library = new Library({ root: $('#library'), onOpen: openArticle, onStar: toggleStar, onProgress: chooseProgress, onTag: filterTag });
-const modes = new ModeViews({ root: $('#mode-content'), shelves: $('#shelves'),
-  onOpen: openArticle, onDecision: decide, onRemove: id => decide(id, 'remove'),
-  onReorder: ids => saveQueue({ ...queue, queue: ids }), onPile: startPile,
-  getBody: slug => store.getArticle(slug) });
-const editionView = new EditionView({ root: $('#edition-content'), onOpen: openArticle,
-  onDecision: decide, onAgree: agreeWithMargin, onRevise: reviseMargin, onMode: setMode });
 const pane = new NotesPane({ root: $('#notes-content'), onChange: value => {
   if (!active) return;
   notes.long_notes = value; notes.long_notes_updated_at = now(); saveNotes();
@@ -115,54 +103,12 @@ function changeConnection(action, link) {
     return writeArticleNotes(article, undoConnection(current, before, after, slug));
   } });
 }
-function agreeWithMargin() {
-  const highlight = findMargin(edition, notesCache.get(edition?.margin?.slug));
-  if (!highlight) return;
-  const article = edition.margin.slug, currentStore = store;
-  const before = structuredClone(notesCache.get(article));
-  const after = setStillAgree(before, highlight.id, localDate());
-  persist(writeArticleNotes(article, after));
-  notify('Still agree recorded ·', { undo: () => {
-    if (store !== currentStore) return;
-    const current = notesCache.get(article);
-    if (current) return writeArticleNotes(article, undoStillAgree(current, before, after, highlight.id));
-  } });
-}
-async function reviseMargin() {
-  const highlight = findMargin(edition, notesCache.get(edition?.margin?.slug));
-  if (!highlight) return;
-  const slug = edition.margin.slug, currentStore = store;
-  await openArticle(slug);
-  if (store !== currentStore || active?.slug !== slug || !bodies.has(slug)) return;
-  showDrawer('notes');
-  pane.reviseQuote(highlight.quote);
-}
-
 function items() {
   return libraryItems.map(item => ({ ...libraryFields(item), ...state[item.id],
     ...effectiveState(item, state[item.id]), notes: notesCache.get(item.slug) }));
 }
 function renderLibrary() {
-  const projected = items();
-  const { arrivals } = splitArrivals(projected, {}, queue.arrivals_since);
-  document.body.dataset.mode = mode;
-  for (const button of document.querySelectorAll('button[data-mode]')) {
-    const target = button.dataset.mode;
-    button.textContent = target === 'arrivals' ? `Arrivals (${arrivals.length})`
-      : target === 'queue' ? `Up next (${queue.queue.length}/10)` : target === 'edition' ? 'Edition' : 'Library';
-    if (target === 'edition') button.hidden = !edition;
-    button.setAttribute('aria-pressed', String(target === mode || (target === 'arrivals' && mode === 'pile')));
-  }
-  $('#library-toggle').setAttribute('aria-pressed', String(mode === 'library'));
-  $('.library-tools').hidden = mode !== 'library';
-  $('#library-scroll').hidden = mode !== 'library';
-  $('.sidebar-footer').hidden = mode !== 'library';
-  modes.render(mode === 'edition' ? 'library' : mode, projected,
-    { queue, arrivals_since: queue.arrivals_since, namespace: store?.namespace || 'locked', activeId: active?.id });
-  $('#mode-content').hidden = mode === 'library' || mode === 'edition';
-  $('#edition-content').hidden = mode !== 'edition';
-  if (mode === 'edition') editionView.render(edition, projected, notesCache.get(edition?.margin?.slug));
-  if (mode === 'library') library.render(projected, { activeId: active?.id, query, tag, starredOnly, progress: progressFilter,
+  library.render(items(), { activeId: active?.id, query, tag, starredOnly, progress: progressFilter,
     withNotes, shortOnly, source: sourceFilter, bodies: new Map([...searchIndex, ...bodies]) });
   $('#library-total').textContent = `${libraryItems.length} items`;
   $('#tag-filter').hidden = !tag; $('#tag-filter').textContent = `${tag} ×`;
@@ -172,100 +118,12 @@ function renderLibrary() {
 }
 function currentItem(id = active?.id) { return items().find(item => String(item.id) === String(id)); }
 function saveState() { persist(store.saveState(state)); renderLibrary(); updateReaderButtons(); }
-function saveQueue(value) {
-  queue = value;
-  persist(store.saveQueue(value));
-  renderLibrary();
-}
-function setMode(value) {
-  mode = value === 'edition' && !edition ? fallbackMode() : value;
-  renderLibrary();
-  document.body.classList.remove('sidebar-collapsed');
-  closeDrawers();
-  if (mobile()) showDrawer('library');
-  if (mode !== 'library') $(mode === 'edition' ? '#edition-content' : '#mode-content').focus({ preventScroll: true });
-}
-function fallbackMode() {
-  return defaultView(queue.queue, splitArrivals(libraryItems, state, queue.arrivals_since).arrivals);
-}
-async function refreshEdition(refresh = true) {
-  if (!store || !editionDate) return;
-  const currentStore = store, date = localDate();
-  if (editionRequest?.store === store && editionRequest.date === date) return editionRequest.promise;
-  if (date !== editionDate) {
-    editionDate = date;
-    edition = null;
-    renderLibrary();
-  }
-  const request = { store: currentStore, date };
-  request.promise = (async () => {
-    try {
-      const value = await currentStore.getEdition(date, { refresh });
-      if (store !== currentStore || date !== localDate()) return;
-      let changed = JSON.stringify(edition) !== JSON.stringify(value) || (!value && mode === 'edition');
-      edition = value;
-      if (!edition && mode === 'edition') mode = fallbackMode();
-      if (edition?.margin && !notesCache.has(edition.margin.slug)) {
-        const saved = await currentStore.getNotes(edition.margin.slug);
-        if (store !== currentStore || date !== localDate()) return;
-        if (!notesCache.has(edition.margin.slug)) {
-          notesCache.set(edition.margin.slug, saved);
-          changed = true;
-        }
-      }
-      if (changed) renderLibrary();
-    } catch (error) {
-      if (store === currentStore) handleError(error);
-    } finally {
-      if (editionRequest === request) editionRequest = null;
-    }
-  })();
-  editionRequest = request;
-  return request.promise;
-}
-function checkEditionDate() {
-  if (store && editionDate && editionDate !== localDate()) void refreshEdition();
-}
-setInterval(checkEditionDate, 30000);
-function startPile() {
-  const pile = splitArrivals(items(), {}, queue.arrivals_since).pile;
-  modes.startPile(pile.sort((a, b) => Date.parse(a.added_at) - Date.parse(b.added_at)).slice(0, 20).map(item => item.id));
-  setMode('pile');
-}
-function decide(id, action) {
-  const item = currentItem(id), currentStore = store;
-  if (!item) return;
-  if (action === 'enqueue' && queue.queue.includes(item.id)) { notify('Already in Up next.'); return; }
-  const timestamp = now(), decision = triageDecision(currentItem(id), queue, action, timestamp);
-  if (!decision) { notify('Up next is full. Finish or remove one first.'); return; }
-  flushPosition();
-  state[id] = { ...state[id], ...decision.patch };
-  if (JSON.stringify(queue.queue) !== JSON.stringify(decision.queueAfter)) saveQueue({ ...queue, queue: decision.queueAfter });
-  saveState();
-  if (action === 'read') void openArticle(id, 'push', timestamp);
-  const labels = { 'up-next': 'Added to Up next', enqueue: 'Added to Up next', keep: 'Kept in library',
-    'let-go': 'Let go', read: 'Opened for reading', remove: 'Removed from Up next' };
-  notify(`${labels[action]} ·`, { undo: () => {
-    if (store !== currentStore) return;
-    const restored = undoDecision(currentItem(id), queue, decision);
-    if (!restored) return;
-    if (pendingPosition?.id === id) { pendingPosition = null; clearTimeout(positionTimer); }
-    state[id] = { ...state[id], ...restored.patch };
-    if (JSON.stringify(queue.queue) !== JSON.stringify(restored.queue.queue)) saveQueue(restored.queue);
-    modes.restoreCard(id);
-    if (action === 'read' && active?.id === id) closeArticle();
-    saveState();
-  } });
-}
 function setProgress(id, progress) {
   const item = currentItem(id); if (!item) return;
   if (pendingPosition?.id === id) flushPosition();
   const timestamp = now();
   state[item.id] = { ...state[item.id], progress, progress_changed_at: timestamp,
     triaged_at: item.triaged_at || (progress !== 'new' ? timestamp : null) };
-  if ((progress === 'finished' || progress === 'let_go') && queue.queue.includes(item.id)) {
-    saveQueue({ ...queue, queue: queue.queue.filter(value => value !== item.id) });
-  }
   saveState();
 }
 const autoFinish = new Map();
@@ -275,7 +133,6 @@ function tracker(id) {
 }
 function progressWithUndo(id, progress, message, undoProgress) {
   const before = currentItem(id), currentStore = store;
-  const beforeQueue = queue.queue.slice();
   if (!before || before.progress === progress) return;
   setProgress(id, progress);
   const changedAt = state[id].progress_changed_at;
@@ -283,7 +140,6 @@ function progressWithUndo(id, progress, message, undoProgress) {
     if (store !== currentStore || state[id]?.progress_changed_at !== changedAt) return;
     setProgress(id, undoProgress ? undoProgress() : before.progress);
     state[id] = { ...state[id], triaged_at: before.triaged_at };
-    if (beforeQueue.includes(id)) saveQueue({ ...queue, queue: beforeQueue });
     saveState();
   } });
 }
@@ -344,7 +200,7 @@ function deleteHighlight(highlight) {
     renderLibrary();
   } });
 }
-function filterTag(value) { tag = tag === value ? '' : value; setMode('library'); }
+function filterTag(value) { tag = tag === value ? '' : value; renderLibrary(); if (mobile()) showDrawer('library'); }
 function externalLink(label, href) {
   try {
     const url = new URL(href);
@@ -382,7 +238,7 @@ function renderHeader(item) {
   root.append(byline);
   const tags = text('div', '', 'article-tags');
   for (const value of item.tags || []) {
-    const button = text('button', value, 'tag-chip'); button.addEventListener('click', () => filterTag(value)); tags.append(button);
+    const button = text('button', tagLabel(value), 'tag-chip'); button.addEventListener('click', () => filterTag(value)); tags.append(button);
   }
   root.append(tags);
   if (item.summary) {
@@ -475,24 +331,19 @@ async function connect(settings = getSettings()) {
   store?.dispose();
   store = new ReadingStore(settings); const currentStore = store;
   autoFinish.clear(); syncedAt = null;
-  libraryItems = []; state = {}; active = null; mode = 'library'; queue = { queue: [], arrivals_since: '' };
-  edition = null; editionDate = ''; editionRequest = null;
+  libraryItems = []; state = {}; active = null;
   bodies = new Map(); searchIndex = new Map(); notesCache = new Map(); summaries = new Map();
   $('#mode-badge').textContent = settings.token ? 'PRIVATE' : 'DEMO';
   store.addEventListener('change', event => {
     if (store !== currentStore) return;
     const { status, message } = event.detail;
     $('#sync-status').dataset.status = status;
-    if (status === 'synced') { syncedAt = new Date(); updateSyncTime(); void refreshEdition(); }
+    if (status === 'synced') { syncedAt = new Date(); updateSyncTime(); }
     else { $('#sync-status').textContent = message; $('#sync-status').title = message; }
   });
   store.addEventListener('state-updated', event => {
     if (store !== currentStore) return;
     state = event.detail.state; renderLibrary(); updateReaderButtons();
-  });
-  store.addEventListener('queue-updated', event => {
-    if (store !== currentStore) return;
-    queue = event.detail.queue; renderLibrary();
   });
   store.addEventListener('notes-updated', event => {
     if (store !== currentStore) return;
@@ -525,11 +376,6 @@ async function connect(settings = getSettings()) {
     const initial = await store.init();
     if (version !== connectionVersion) return;
     libraryItems = initial.library; state = initial.state || {};
-    queue = initial.queue;
-    editionDate = localDate();
-    await refreshEdition();
-    if (version !== connectionVersion) return;
-    mode = defaultView(queue.queue, splitArrivals(libraryItems, state, queue.arrivals_since).arrivals, edition);
     const sourceSelect = $('#source-filter');
     sourceSelect.replaceChildren(new Option('All sources', ''));
     for (const label of [...new Set(libraryItems.map(item => libraryFields(item).source_label).filter(Boolean))].sort()) {
@@ -538,12 +384,10 @@ async function connect(settings = getSettings()) {
     sourceSelect.value = sourceFilter;
     renderLibrary();
     const slug = articleSlug();
-    const defaultPick = !slug && mode === 'edition'
-      ? ['long', 'short', 'archive'].map(slot => edition.picks.find(pick => pick.slot === slot))
-        .map(pick => pick && items().find(item => item.slug === pick.slug))
-        .find(item => item && !['finished', 'let_go'].includes(item.progress))
-      : !slug && mode === 'queue' ? currentItem(queue.queue[0]) : null;
-    const first = libraryItems.find(item => item.slug === slug) || defaultPick;
+    // With no article in the link, reopen the one you were last reading.
+    const lastReading = slug ? null : items().filter(item => item.progress === 'reading' && item.last_opened_at)
+      .sort((a, b) => Date.parse(b.last_opened_at) - Date.parse(a.last_opened_at))[0];
+    const first = libraryItems.find(item => item.slug === slug) || lastReading;
     if (first) await openArticle(first.id, slug ? 'replace' : 'preview');
     else {
       $('#article-header').replaceChildren(text('h1', libraryItems.length ? 'Choose something to read.' : 'A quiet place to read.'));
@@ -575,8 +419,6 @@ async function disconnect() {
   flushPosition();
   const previous = store; store = null;
   active = null; articleReady = false; libraryItems = []; state = {}; notes = emptyNotes(); bot = '';
-  queue = { queue: [], arrivals_since: '' }; mode = 'library';
-  edition = null; editionDate = ''; editionRequest = null;
   bodies.clear(); searchIndex.clear(); notesCache.clear(); summaries.clear();
   query = ''; tag = ''; starredOnly = false; progressFilter = ''; withNotes = false; shortOnly = false; sourceFilter = '';
   $('#search').value = ''; $('#search-status').textContent = ''; $('#progress-filter').value = ''; $('#source-filter').value = '';
@@ -626,8 +468,6 @@ $('#tag-filter').addEventListener('click', () => { tag = ''; renderLibrary(); })
 $('#read-toggle').addEventListener('click', toggleRead);
 $('#reader-star').addEventListener('click', () => toggleStar());
 $('#let-go').addEventListener('click', () => { $('#reader-more').open = false; chooseProgress(active?.id, 'let_go'); });
-$('#up-next').addEventListener('click', () => { $('#reader-more').open = false; decide(active?.id, 'enqueue'); });
-document.querySelectorAll('button[data-mode]').forEach(button => button.addEventListener('click', () => setMode(button.dataset.mode)));
 function flushPosition() {
   clearTimeout(positionTimer); positionTimer = null;
   if (!pendingPosition || !store) return;
@@ -706,10 +546,7 @@ function showDrawer(which) {
   $('#sidebar').inert = which !== 'library';
   $('#notes-pane').inert = which !== 'notes';
   $('#reader-pane').inert = true;
-  if (which === 'library') {
-    if (mode === 'library') $('#search').focus();
-    else $(mode === 'edition' ? '#edition-content' : '#mode-content').focus({ preventScroll: true });
-  }
+  if (which === 'library') $('#search').focus();
   else pane.focus();
 }
 function closeDrawers() {
@@ -723,7 +560,6 @@ function closeDrawers() {
   if (restoreFocus) $('#reader-pane').focus({ preventScroll: true });
 }
 $('#library-toggle').addEventListener('click', () => {
-  if (mode !== 'library') { setMode('library'); return; }
   if (mobile()) { if (document.body.classList.contains('library-open')) closeDrawers(); else showDrawer('library'); }
   else { document.body.classList.toggle('sidebar-collapsed'); closeDrawers(); }
 });
@@ -739,14 +575,18 @@ function setTheme() {
 }
 setTheme();
 $('#theme-toggle').addEventListener('click', () => { theme = theme === 'dark' ? 'light' : 'dark'; localStorage.setItem('reading-theme', theme); setTheme(); });
-let width = Math.max(22, Math.min(50, Number(localStorage.getItem('reading-notes-width')) || 30));
-function setWidth(value) { width = Math.max(22, Math.min(50, value)); document.documentElement.style.setProperty('--notes-width', `${width}vw`); $('#notes-resizer').setAttribute('aria-valuenow', String(Math.round(width))); }
-setWidth(width);
+// By default the reader and the notes share the space beside the library equally (CSS --notes-width).
+// A width you choose by dragging is kept on this device.
+const WIDTH_KEY = 'reading-notes-width-v2';
+let width = Number(localStorage.getItem(WIDTH_KEY)) || 0;
+function setWidth(value) { width = Math.max(22, Math.min(55, value)); document.documentElement.style.setProperty('--notes-width', `${width}vw`); $('#notes-resizer').setAttribute('aria-valuenow', String(Math.round(width))); }
+function currentWidth() { return width || $('#notes-pane').getBoundingClientRect().width / innerWidth * 100 || 40; }
+if (width) setWidth(width); else $('#notes-resizer').setAttribute('aria-valuenow', '40');
 $('#notes-resizer').addEventListener('pointerdown', e => { e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); document.body.classList.add('resizing'); });
 $('#notes-resizer').addEventListener('pointermove', e => { if (e.currentTarget.hasPointerCapture(e.pointerId)) setWidth((innerWidth - e.clientX) / innerWidth * 100); });
-function endResize() { document.body.classList.remove('resizing'); localStorage.setItem('reading-notes-width', String(width)); }
+function endResize() { document.body.classList.remove('resizing'); if (width) localStorage.setItem(WIDTH_KEY, String(width)); }
 $('#notes-resizer').addEventListener('pointerup', endResize); $('#notes-resizer').addEventListener('pointercancel', endResize);
-$('#notes-resizer').addEventListener('keydown', e => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); setWidth(width + (e.key === 'ArrowLeft' ? 1 : -1)); endResize(); } });
+$('#notes-resizer').addEventListener('keydown', e => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); setWidth(currentWidth() + (e.key === 'ArrowLeft' ? 1 : -1)); endResize(); } });
 
 function showSettings() {
   closeMore(); $('#advanced-connection').open = false;
@@ -826,20 +666,14 @@ function closeArticle(navigation = 'push') {
   if (mobile()) showDrawer('library');
   else {
     document.body.classList.remove('sidebar-collapsed'); closeDrawers();
-    if (mode === 'library') library.move(0);
-    else $(mode === 'edition' ? '#edition-content' : '#mode-content').focus({ preventScroll: true });
+    library.move(0);
   }
 }
 document.addEventListener('keydown', e => {
   if (access.blocked || access.busy || e.defaultPrevented || e.isComposing) return;
   const editing = e.target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="textbox"]');
   if (editing || e.ctrlKey || e.metaKey) return;
-  if (e.altKey) {
-    if (mode === 'queue' && !document.querySelector('dialog[open]') && $('#more-menu').hidden && ['ArrowUp', 'ArrowDown'].includes(e.key)) {
-      e.preventDefault(); modes.reorderFocused(e.key === 'ArrowUp' ? -1 : 1);
-    }
-    return;
-  }
+  if (e.altKey) return;
   if (e.key === 'Escape') {
     if (document.querySelector('dialog[open]')) return;
     e.preventDefault();
@@ -854,30 +688,19 @@ document.addEventListener('keydown', e => {
     return;
   }
   if (document.querySelector('dialog[open]') || !$('#more-menu').hidden) return;
-  if ((mode === 'arrivals' || mode === 'pile') && !e.target.closest('#reader-pane, #notes-pane')) {
-    const key = e.key.toLowerCase();
-    if (['u', 'k', 'l'].includes(key)) { e.preventDefault(); modes.decide(key); return; }
-    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); modes.move(e.key === 'ArrowLeft' ? -1 : 1); return; }
-    if (e.key === 'Enter' && !e.target.closest('button,a,summary')) { e.preventDefault(); modes.openFocused(); return; }
-  }
-  if (mode === 'queue' && e.key.toLowerCase() === 'x') { e.preventDefault(); modes.removeFocused(); return; }
   const move = delta => {
     if (mobile()) showDrawer('library');
     else { document.body.classList.remove('sidebar-collapsed'); closeDrawers(); }
-    if (mode === 'library') library.move(delta);
-    else if (mode === 'edition') editionView.move(delta);
-    else modes.move(delta);
+    library.move(delta);
   };
   const actions = {
     j: () => move(1), k: () => move(-1), r: toggleRead, s: () => toggleStar(),
     h: () => reader.highlight(), n: () => { showDrawer('notes'); pane.focus(); },
-    '/': () => { setMode('library'); $('#search').focus(); }, '?': showHelp
+    '/': () => { if (mobile()) showDrawer('library'); else document.body.classList.remove('sidebar-collapsed'); $('#search').focus(); }, '?': showHelp
   };
-  if (e.key === 'Enter' && (!e.target.closest('button,a,summary') || e.target.matches('.library-title, .queue-open, .edition-open'))) {
+  if (e.key === 'Enter' && (!e.target.closest('button,a,summary') || e.target.matches('.library-title'))) {
     e.preventDefault();
-    if (mode === 'library') library.openFocused();
-    else if (mode === 'edition') editionView.openFocused();
-    else modes.openFocused();
+    library.openFocused();
   } else if (actions[e.key]) { e.preventDefault(); actions[e.key](); }
 });
 function restoreArticle() {
@@ -896,7 +719,6 @@ window.addEventListener('hashchange', restoreArticle);
 window.addEventListener('blur', () => { flushPosition(); if (store) persist(store.flush()); });
 document.addEventListener('visibilitychange', () => {
   if (document.hidden && store) { flushPosition(); persist(store.flush()); }
-  else checkEditionDate();
 });
 window.addEventListener('online', () => { if (store) persist(store.flush()); });
 closeDrawers(); void access.start();

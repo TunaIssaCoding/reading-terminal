@@ -4,7 +4,5 @@ import './model.test.mjs';
 import './bot.test.mjs';
 import './progress.test.mjs';
 import './queue.test.mjs';
-import './modes.test.mjs';
-import './triage.test.mjs';
 import './edition.test.mjs';
 import './connections.test.mjs';

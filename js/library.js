@@ -21,6 +21,12 @@ function noteCount(item) {
   ), 0);
 }
 
+/** Display a stored lowercase tag in sentence case: "tech & ai" -> "Tech & AI". */
+export function tagLabel(tag) {
+  const value = String(tag || '').trim();
+  return (value.charAt(0).toLocaleUpperCase() + value.slice(1)).replace(/\bai\b/gi, 'AI');
+}
+
 function timestamp(value) {
   const time = Date.parse(value || '');
   return Number.isFinite(time) ? time : 0;
@@ -170,7 +176,7 @@ export class Library {
     row.append(titleLine);
     const metadata = element('div', 'library-metadata');
     (item.tags || []).slice(0, 1).forEach(tag => {
-      const chip = element('button', 'tag-chip tag-domain', tag);
+      const chip = element('button', 'tag-chip tag-domain', tagLabel(tag));
       chip.type = 'button';
       chip.dataset.action = 'tag';
       chip.dataset.tag = tag;
