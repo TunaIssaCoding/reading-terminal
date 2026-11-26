@@ -151,6 +151,13 @@
   <button id="drawer-backdrop" aria-label="Close drawer" hidden></button>
   <div id="selection-actions" class="selection-actions" role="toolbar" aria-label="Selection actions" hidden><button id="highlight-selection">Highlight <kbd>h</kbd></button><button id="send-selection">Send to notes</button><button id="copy-selection">Copy</button></div>
   <div id="toast" role="status" aria-live="polite" hidden></div>
+  <dialog id="image-viewer" aria-label="Image viewer">
+    <img id="viewer-image" alt="">
+    <button type="button" class="viewer-close" data-close aria-label="Close image">×</button>
+    <button type="button" class="viewer-prev" aria-label="Previous image" hidden>‹</button>
+    <button type="button" class="viewer-next" aria-label="Next image" hidden>›</button>
+    <p id="viewer-count" class="viewer-count" aria-live="polite"></p>
+  </dialog>
   <dialog id="settings-dialog" aria-labelledby="settings-title">
     <header class="dialog-header"><div><span class="section-eyebrow">YOUR DATA, YOUR REPOSITORY</span><h2 id="settings-title">Settings</h2></div><button type="button" data-close aria-label="Close settings">×</button></header>
     <section id="security-section">

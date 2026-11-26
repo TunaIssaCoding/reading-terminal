@@ -7,6 +7,7 @@ import { BotBox } from './bot.js';
 import { createAutoFinish } from './progress.js';
 import { effectiveState, libraryFields, pickUnread } from './model.js';
 import { connectionDecision, undoConnection } from './connections.js';
+import { ImageViewer } from './lightbox.js';
 
 const $ = selector => document.querySelector(selector);
 let clock = Date.now();
@@ -68,6 +69,7 @@ const reader = new Reader({ root: $('#article-body'), warnings: $('#anchor-warni
   notes.highlights = highlights; pane.updateMargins(highlights.filter(h => !h.deleted)); saveNotes();
 }, onQuote: quote => { showDrawer('notes'); pane.appendQuote(quote); }, onOpen: openArticle,
 getAsset: path => store.getAsset(path, active ? `articles/${active.slug}.md` : ''), notify, onDelete: deleteHighlight });
+new ImageViewer({ dialog: $('#image-viewer') });
 const botBox = new BotBox({ root: $('#bot-box'), onOpen: openArticle,
   getItem: slug => libraryItems.find(item => item.slug === slug),
   onKeep: link => changeConnection('keep', link),
