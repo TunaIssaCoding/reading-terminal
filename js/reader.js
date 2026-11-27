@@ -2,7 +2,7 @@ import { renderMarkdown } from './markdown.js';
 
 const uid = () => crypto.randomUUID();
 const elementTarget = target => target?.nodeType === Node.ELEMENT_NODE ? target : target?.parentElement;
-const isTyping = target => elementTarget(target)?.closest('input, textarea, [contenteditable]:not([contenteditable="false"]), .interlinear-editor');
+const isTyping = target => elementTarget(target)?.closest('input, textarea, [contenteditable]:not([contenteditable="false"]), .note-editor');
 const textNodes = root => {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   const nodes = []; let node;
@@ -21,6 +21,28 @@ function rangeAt(nodes, start, end) {
   const range = document.createRange();
   range.setStart(...point(nodes, start)); range.setEnd(...point(nodes, end));
   return range;
+}
+
+/**
+ * Where a highlight's note goes: just after the sentence the highlight ends in, past its closing
+ * quotes and spaces, or at the end of the paragraph. A full stop only ends a sentence when the next
+ * word starts with a capital, a digit or a quote, so "e.g. this" and "3.14" don't split.
+ */
+export function sentenceEnd(text, offset) {
+  let from = Math.max(0, Math.min(offset, text.length));
+  while (from > 0 && /\s/.test(text[from - 1])) from--;
+  const end = /[.!?…]+["'”’»)\]]*(?=\s+[\p{Lu}\p{N}"'“‘«(\[]|\s*$)/gu;
+  end.lastIndex = Math.max(0, from - 1);
+  const match = end.exec(text);
+  if (!match) return text.length;
+  let index = match.index + match[0].length;
+  while (index < text.length && /\s/.test(text[index])) index++;
+  return index;
+}
+
+function fit(editor) {
+  editor.style.height = 'auto';
+  editor.style.height = `${editor.scrollHeight}px`;
 }
 
 function separateImageParagraphs(root) {
@@ -50,8 +72,6 @@ export class Reader {
     Object.assign(this, { root, warnings, onChange, onQuote, onDelete, onOpen, getAsset, notify });
     this.highlights = []; this.lines = []; this.active = null;
     this.actions = document.querySelector('#selection-actions');
-    this.canvas = document.createElement('canvas');
-    this.measure = this.canvas.getContext('2d');
     document.addEventListener('selectionchange', () => this.captureSelection());
     this.actions.addEventListener('pointerdown', e => e.preventDefault());
     document.querySelector('#highlight-selection').addEventListener('click', () => this.highlight());
@@ -87,6 +107,7 @@ export class Reader {
     this.root.addEventListener('dragstart', e => this.drag(e));
     this.root.addEventListener('dragend', () => document.body.classList.remove('dragging-highlight'));
     this.root.addEventListener('input', e => this.input(e));
+    this.root.addEventListener('compositionend', e => this.input(e));
     this.root.addEventListener('keydown', e => this.editorKey(e));
     this.root.addEventListener('click', e => {
       const button = elementTarget(e.target)?.closest('[data-note-action]');
@@ -98,16 +119,6 @@ export class Reader {
       } else if (button.dataset.noteAction === 'quote') this.onQuote(item.quote);
       else this.edit(item.id);
     });
-    this.resize = new ResizeObserver(entries => {
-      const width = Math.round(entries[0].contentRect.width);
-      if (width === this.layoutWidth || !this.markdown) return;
-      clearTimeout(this.resizeTimer);
-      this.resizeTimer = setTimeout(() => {
-        if (Math.round(this.root.getBoundingClientRect().width) !== this.layoutWidth) this.layout();
-      }, 100);
-    });
-    this.resize.observe(root);
-    document.fonts?.ready.then(() => { if (this.markdown) this.layout(); });
   }
   setArticle(markdown, highlights = []) {
     this.markdown = markdown; this.highlights = structuredClone(highlights);
@@ -130,7 +141,6 @@ export class Reader {
   }
   layout() {
     const focused = this.caret();
-    this.layoutWidth = Math.round(this.root.getBoundingClientRect().width);
     this.closeActions();
     this.root.innerHTML = renderMarkdown(this.markdown || '');
     separateImageParagraphs(this.root);
@@ -149,25 +159,20 @@ export class Reader {
       this.text += text;
     }
     this.anchors = this.highlights.filter(h => !h.deleted).map(h => ({ h, ...this.anchor(h) }));
+    for (const anchor of this.anchors) if (anchor.start !== undefined) anchor.noteAt = this.noteOffset(anchor.end);
     for (let para = 0; para < this.paragraphs.length; para++) {
-      const block = this.paragraphs[para];
-      const { el, text, nodes, start: globalStart } = block;
-      // Measure real browser line breaks before replacing a paragraph with explicit lines.
-      const breaks = []; let lineStart = 0; let top = null;
-      const lineThreshold = parseFloat(getComputedStyle(el).lineHeight) / 2;
-      for (let i = 0; i < text.length; i++) {
-        const rect = rangeAt(nodes, i, i + 1).getBoundingClientRect();
-        if (!rect.height) continue;
-        if (top !== null && Math.abs(rect.top - top) > lineThreshold) { breaks.push([lineStart, i]); lineStart = i; }
-        top = rect.top;
-      }
-      breaks.push([lineStart, text.length]);
+      const { el, text, nodes, start: globalStart } = this.paragraphs[para];
+      const globalEnd = globalStart + text.length;
+      // Text flows normally. A paragraph is split only after a highlighted sentence, so a note can
+      // open up space right below that sentence; empty note slots take no space.
+      const breaks = [...new Set([globalStart, globalEnd,
+        ...this.anchors.map(a => a.noteAt).filter(at => at > globalStart && at < globalEnd)])].sort((a, b) => a - b);
       const fragment = document.createDocumentFragment();
-      for (const [start, end] of breaks) {
+      for (let i = 0; i < breaks.length - 1; i++) {
+        const from = breaks[i], to = breaks[i + 1];
         const line = document.createElement('span'); line.className = 'source-line';
         const source = document.createElement('span'); source.className = 'line-text';
         const gap = document.createElement('span'); gap.className = 'line-gap';
-        const from = globalStart + start, to = globalStart + end;
         const overlapping = this.anchors.filter(a => a.start !== undefined && a.start < to && a.end > from);
         const cuts = [...new Set([from, to, ...overlapping.flatMap(a => [Math.max(from, a.start), Math.min(to, a.end)])])].sort((a, b) => a - b);
         for (let c = 0; c < cuts.length - 1; c++) {
@@ -178,19 +183,15 @@ export class Reader {
           run.className = 'source-run'; run.dataset.offset = a; run.dataset.end = b;
           if (highlight) {
             run.dataset.highlight = highlight.h.id; run.draggable = true;
-            run.title = 'Click to edit margin note · drag to long notes';
+            run.title = 'Click to add or edit a note · drag to long notes';
           }
           const range = rangeAt(nodes, a - globalStart, b - globalStart);
           let content = range.cloneContents();
-          // A range contained in one link omits that link's own element.
-          // Keep its inline ancestry when splitting the source into visual lines.
+          // A range contained in one link omits that link's own element. Keep its inline ancestry.
           for (let ancestor = elementTarget(range.commonAncestorContainer); ancestor && ancestor !== el; ancestor = ancestor.parentElement) {
             const wrapper = ancestor.cloneNode(false);
             wrapper.append(content); content = wrapper;
           }
-          // Explicit lines already account for hard breaks. Preserve code offsets.
-          content.querySelectorAll('br').forEach(br => br.remove());
-          if (el.tagName === 'PRE') for (const node of textNodes(content)) node.data = node.data.replace(/\n/g, '\u200b');
           run.append(content);
           source.append(run);
         }
@@ -207,6 +208,14 @@ export class Reader {
       this.getAsset(path).then(url => { if (img.isConnected) img.src = url; })
         .catch(() => { img.alt = `${img.alt || 'Image'} — unavailable offline or missing`; });
     }
+  }
+  /** The text offset a highlight's note sits at: the end of the sentence its last character is in. */
+  noteOffset(end) {
+    const block = this.paragraphs.find(p => end > p.start && end <= p.start + p.text.length);
+    if (!block) return end;
+    const blockEnd = block.start + block.text.length;
+    if (block.el.tagName === 'PRE' || /^H[1-6]$/.test(block.el.tagName)) return blockEnd;
+    return block.start + sentenceEnd(block.text, end - block.start);
   }
   anchor(h) {
     if (!h.quote) return {};
@@ -281,136 +290,68 @@ export class Reader {
   }
   caret() {
     const editor = document.activeElement;
-    if (!editor?.matches('.interlinear-editor')) return null;
-    return { id: editor.dataset.id, offset: Number(editor.dataset.start) + editor.selectionStart };
-  }
-  chunk(text, start, width) {
-    if (start >= text.length) return { start, end: start, next: start, text: '' };
-    let end = start; let lastSpace = -1;
-    while (end < text.length && text[end] !== '\n') {
-      if (this.measure.measureText(text.slice(start, end + 1)).width > width && end > start) break;
-      if (/\s/.test(text[end])) lastSpace = end;
-      end++;
-    }
-    if (end < text.length && text[end] !== '\n' && lastSpace > start) end = lastSpace + 1;
-    return { start, end, next: text[end] === '\n' ? end + 1 : end, text: text.slice(start, end) };
+    if (!editor?.matches('.note-editor')) return null;
+    return { id: editor.dataset.id, offset: editor.selectionStart };
   }
   renderNotes(focus = null) {
-    this.root.querySelectorAll('.overflow-gap').forEach(el => el.remove());
     this.lines.forEach(line => line.gap.replaceChildren());
-    this.measure.font = 'italic 13px Georgia';
     const placed = this.anchors.filter(a => a.start !== undefined).sort((a, b) => a.start - b.start);
-    for (const anchor of placed) {
-      const { h, start } = anchor;
+    for (const { h, noteAt } of placed) {
       if (!h.note?.trim() && this.active !== h.id) continue;
-      let lineIndex = this.lines.findIndex(line => start >= line.start && start < line.end);
-      if (lineIndex < 0) continue;
-      let offset = 0; let first = true;
-      do {
-        let line = this.lines[lineIndex];
-        if (!line) {
-          const gap = document.createElement('div'); gap.className = 'line-gap overflow-gap';
-          this.root.append(gap); line = { gap, source: this.root, start: -1, end: -1 };
-        }
-        let indent = 0;
-        if (first) {
-          const run = [...line.source.querySelectorAll('.source-run')].find(r => Number(r.dataset.offset) <= start && Number(r.dataset.end) > start);
-          if (run) {
-            const nodes = textNodes(run), local = start - Number(run.dataset.offset);
-            const rect = rangeAt(nodes, local, Math.min(local + 1, run.textContent.length)).getBoundingClientRect();
-            indent = Math.max(0, rect.left - line.source.getBoundingClientRect().left);
-          }
-        }
-        const row = document.createElement('span'); row.className = 'note-row';
-        row.style.marginLeft = `${indent}px`;
-        const width = Math.max(20, line.source.getBoundingClientRect().width - indent);
-        row.style.width = `${width}px`;
-        const available = width - 8;
-        const chunk = this.chunk(h.note || '', offset, available);
-        if (this.active === h.id) {
-          const editor = document.createElement('textarea'); editor.className = 'interlinear-editor';
-          editor.rows = 1; editor.wrap = 'off'; editor.spellcheck = false;
-          editor.value = chunk.text; editor.dataset.id = h.id; editor.dataset.start = chunk.start; editor.dataset.end = chunk.end;
-          editor.setAttribute('aria-label', first ? 'Interlinear note' : 'Interlinear note continued');
-          if (first) editor.placeholder = 'A thought between the lines…';
-          row.append(editor);
-        } else {
-          const note = document.createElement('button'); note.className = 'interlinear-text';
-          note.dataset.noteAction = 'edit'; note.dataset.id = h.id;
-          note.textContent = chunk.text || 'Add a margin note…'; note.setAttribute('aria-label', `Edit margin note: ${chunk.text || h.quote}`);
-          row.append(note);
-        }
-        if (first) {
-          const controls = document.createElement('span'); controls.className = 'note-controls';
-          for (const [action, text, label] of [['quote', '↗', 'Send highlighted passage to long notes'], ['delete', '×', 'Delete highlight']]) {
-            const button = document.createElement('button'); button.type = 'button'; button.dataset.noteAction = action;
-            button.dataset.id = h.id; button.textContent = text; button.setAttribute('aria-label', label); button.title = label; controls.append(button);
-          }
-          row.append(controls);
-        }
-        line.gap.append(row); lineIndex++; first = false;
-        if (chunk.next <= offset) break;
-        offset = chunk.next;
-        // A final explicit newline gets its own editable gap.
-        if (offset === h.note.length && h.note.endsWith('\n')) {
-          const next = this.lines[lineIndex];
-          const extra = document.createElement('span'); extra.className = 'note-row';
-          const editor = document.createElement('textarea'); editor.className = 'interlinear-editor'; editor.rows = 1; editor.wrap = 'off';
-          editor.dataset.id = h.id; editor.dataset.start = offset; editor.dataset.end = offset; editor.setAttribute('aria-label', 'Interlinear note continued');
-          if (this.active === h.id) { extra.append(editor); (next?.gap || line.gap).append(extra); }
-        }
-      } while (offset < (h.note || '').length);
+      const line = this.lines.find(value => value.end === noteAt) || this.lines.findLast(value => value.start < noteAt);
+      if (!line) continue;
+      const block = this.noteBlock(h);
+      line.gap.append(block);
+      const editor = block.querySelector('.note-editor');
+      if (editor) fit(editor);
     }
     if (focus) this.focusNote(focus.id, focus.offset);
   }
+  noteBlock(h) {
+    const block = document.createElement('span'); block.className = 'note-block'; block.dataset.id = h.id;
+    if (this.active === h.id) {
+      const editor = document.createElement('textarea'); editor.className = 'note-editor';
+      editor.rows = 1; editor.value = h.note || ''; editor.dataset.id = h.id;
+      editor.placeholder = 'Your note on this passage…';
+      editor.setAttribute('aria-label', 'Note on the highlighted passage');
+      block.append(editor);
+    } else {
+      const note = document.createElement('button'); note.type = 'button'; note.className = 'note-text';
+      note.dataset.noteAction = 'edit'; note.dataset.id = h.id; note.textContent = h.note;
+      note.setAttribute('aria-label', `Edit note: ${h.note}`);
+      block.append(note);
+    }
+    const controls = document.createElement('span'); controls.className = 'note-controls';
+    for (const [action, text, label] of [['quote', '↗', 'Send highlighted passage to long notes'], ['delete', '×', 'Delete highlight']]) {
+      const button = document.createElement('button'); button.type = 'button'; button.dataset.noteAction = action;
+      button.dataset.id = h.id; button.textContent = text; button.setAttribute('aria-label', label); button.title = label; controls.append(button);
+    }
+    block.append(controls);
+    return block;
+  }
   focusNote(id, offset) {
-    const editors = [...this.root.querySelectorAll('.interlinear-editor')].filter(el => el.dataset.id === id);
-    const target = editors.find(el => Number(el.dataset.start) <= offset && Number(el.dataset.end) >= offset) || editors.at(-1);
-    if (!target) return;
-    target.focus({ preventScroll: true });
-    const local = Math.max(0, Math.min(target.value.length, offset - Number(target.dataset.start)));
-    target.setSelectionRange(local, local);
+    const editor = [...this.root.querySelectorAll('.note-editor')].find(el => el.dataset.id === id);
+    if (!editor) return;
+    editor.focus({ preventScroll: true });
+    const at = Math.max(0, Math.min(editor.value.length, offset));
+    editor.setSelectionRange(at, at);
+    editor.scrollIntoView({ block: 'nearest' });
   }
   input(e) {
     const editor = e.target;
-    if (!editor.matches('.interlinear-editor') || e.isComposing) return;
-    const h = this.highlights.find(h => h.id === editor.dataset.id);
+    if (!editor.matches?.('.note-editor') || e.isComposing) return;
+    const h = this.highlights.find(item => item.id === editor.dataset.id);
     if (!h) return;
-    const start = Number(editor.dataset.start), end = Number(editor.dataset.end);
-    const cursor = start + editor.selectionStart;
-    h.note = h.note.slice(0, start) + editor.value + h.note.slice(end);
-    h.updated_at = new Date().toISOString(); this.changed();
-    // Typing on a note's last line that still fits: the rebuilt rows would be identical, so keep this editor.
-    this.measure.font = 'italic 13px Georgia';
-    const available = parseFloat(editor.parentElement?.style.width) - 8;
-    if (editor.value && !editor.value.includes('\n') && start + editor.value.length === h.note.length
-      && this.measure.measureText(editor.value).width <= available) {
-      editor.dataset.end = String(h.note.length);
-      return;
-    }
-    this.renderNotes({ id: h.id, offset: cursor });
+    // The note is one text box below its sentence, so typing never rebuilds the article.
+    h.note = editor.value; h.updated_at = new Date().toISOString();
+    this.changed(); fit(editor);
   }
   editorKey(e) {
     const editor = e.target;
-    if (!editor.matches('.interlinear-editor')) return;
-    const h = this.highlights.find(h => h.id === editor.dataset.id);
-    const start = Number(editor.dataset.start), cursor = start + editor.selectionStart;
-    if (e.key === 'Escape' || (e.key === 'Backspace' && !h.note)) {
-      e.preventDefault(); e.stopPropagation(); this.close(); this.root.closest('main').focus({ preventScroll: true }); return;
-    }
-    if (editor.selectionStart !== editor.selectionEnd) return;
-    if (e.key === 'Backspace' && editor.selectionStart === 0 && cursor > 0) {
-      e.preventDefault(); h.note = h.note.slice(0, cursor - 1) + h.note.slice(cursor);
-      h.updated_at = new Date().toISOString(); this.changed(); this.renderNotes({ id: h.id, offset: cursor - 1 });
-    } else if (e.key === 'Delete' && editor.selectionStart === editor.value.length && cursor < h.note.length) {
-      e.preventDefault(); h.note = h.note.slice(0, cursor) + h.note.slice(cursor + 1);
-      h.updated_at = new Date().toISOString(); this.changed(); this.renderNotes({ id: h.id, offset: cursor });
-    } else if ((e.key === 'ArrowRight' && editor.selectionStart === editor.value.length) || (e.key === 'ArrowLeft' && editor.selectionStart === 0)) {
-      e.preventDefault(); this.focusNote(h.id, cursor + (e.key === 'ArrowRight' ? 1 : -1));
-    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-      const rows = [...this.root.querySelectorAll('.interlinear-editor')].filter(el => el.dataset.id === h.id);
-      const target = rows[rows.indexOf(editor) + (e.key === 'ArrowDown' ? 1 : -1)];
-      if (target) { e.preventDefault(); this.focusNote(h.id, Number(target.dataset.start) + Math.min(editor.selectionStart, target.value.length)); }
+    if (!editor.matches('.note-editor')) return;
+    const h = this.highlights.find(item => item.id === editor.dataset.id);
+    if (e.key === 'Escape' || (e.key === 'Backspace' && !h?.note)) {
+      e.preventDefault(); e.stopPropagation(); this.close(); this.root.closest('main').focus({ preventScroll: true });
     }
   }
   drag(e) {

@@ -195,7 +195,7 @@ export class NotesPane {
       return startA !== startB ? (startA < startB ? -1 : 1) : a.index - b.index;
     });
     const fragment = document.createDocumentFragment();
-    if (!notes.length) fragment.append(element('p', 'empty-state margin-notes-empty', 'Your highlights and interlinear notes will appear here.'));
+    if (!notes.length) fragment.append(element('p', 'empty-state margin-notes-empty', 'Your highlights and their notes will appear here.'));
     for (const { highlight } of notes) {
       const entry = element('article', 'margin-note');
       entry.dataset.highlightId = String(highlight.id || '');

@@ -6,3 +6,4 @@ import './progress.test.mjs';
 import './queue.test.mjs';
 import './edition.test.mjs';
 import './connections.test.mjs';
+import './reader.test.mjs';

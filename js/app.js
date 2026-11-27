@@ -62,7 +62,7 @@ const pane = new NotesPane({ root: $('#notes-content'), onChange: value => {
 onRemoveLink: slug => changeConnection('unkeep', slug), onJump: id => {
   closeDrawers(); reader.edit(id);
   const editor = document.activeElement;
-  if (editor?.matches('.interlinear-editor') && editor.dataset.id === id) editor.scrollIntoView({ block: 'center' });
+  if (editor?.matches('.note-editor') && editor.dataset.id === id) editor.scrollIntoView({ block: 'center' });
 }, notify });
 const reader = new Reader({ root: $('#article-body'), warnings: $('#anchor-warnings'), onChange: highlights => {
   if (!active) return;

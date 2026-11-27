@@ -1,5 +1,5 @@
 // Only public application code belongs in Cache Storage. Private API data stays in IndexedDB.
-const CACHE = 'reading-terminal-shell-v11';
+const CACHE = 'reading-terminal-shell-v12';
 const FILES = ['./', './index.html', './styles.css', './favicon.svg', './favicon.ico', './js/app.js', './js/reader.js', './js/library.js', './js/notes.js', './js/markdown.js', './js/store.js', './js/demo.js', './js/model.js', './js/edition.js', './js/connections.js', './js/lightbox.js', './js/progress.js', './js/bot.js', './js/auth.js', './js/vault.js', './js/passkey.js', './js/session.js', './js/vault-api.js'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(FILES)).then(() => self.skipWaiting()));

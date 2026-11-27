@@ -172,7 +172,7 @@ Editions (`bot/editions/`) are no longer displayed or requested by the app. The 
 | `h` | Highlight source selection |
 | `n` | Focus long notes |
 | `/` | Focus search |
-| `Esc` | Close overlays/menus/drawers, then the reader; the interlinear editor has its own Esc |
+| `Esc` | Close overlays/menus/drawers, then the reader; the note editor has its own Esc |
 | `?` | Keyboard help |
 
 Reading shortcuts do not fire inside inputs, textareas, contenteditable editors, settings or the lock/setup/replacement screens. Dark mode is default; change it in **⋯ → View**. Menus close on Esc and outside click.
@@ -192,7 +192,7 @@ Settings → **Export backup** downloads all available user state, queue and not
 
 ## Implementation and verification
 
-`DESIGN.md` describes module contracts, source-line layout and sync semantics. `REPORT.md` records the checks actually run and known limits. `js/*.js` and `sw.js` are plain JavaScript; no build is required. The markdown renderer escapes raw HTML and allows safe links rather than executing article HTML. HTTPS hosting is recommended and required for service workers except on localhost.
+`DESIGN.md` describes module contracts, the note layout and sync semantics. `REPORT.md` records the checks actually run and known limits. `js/*.js` and `sw.js` are plain JavaScript; no build is required. The markdown renderer escapes raw HTML and allows safe links rather than executing article HTML. HTTPS hosting is recommended and required for service workers except on localhost.
 
 The permanent headless smoke harness uses only fictional data and a mocked GitHub Contents API. With Python Playwright and `/usr/bin/google-chrome` installed, serve `site/` and run from the project root:
 
