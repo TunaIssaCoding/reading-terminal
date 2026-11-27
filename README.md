@@ -179,7 +179,7 @@ Reading shortcuts do not fire inside inputs, textareas, contenteditable editors,
 
 ## Persistence, conflicts, and backups
 
-Every edit is saved to the local cache and durable queue before a roughly two-second network debounce. Blur, hidden visibility and reconnect also request a flush. Closing a browser can interrupt a network request; the durable queue resumes on the next load. Wait for the sync indicator before switching to another device if possible.
+Every edit is saved to the local cache and durable queue first. A commit follows 2 seconds after you stop typing, but at most once every 10 seconds, so a long writing session stays under 360 commits an hour (GitHub allows 500). Leaving the window or app, and reconnecting, sends everything at once. If GitHub asks the app to slow down, it shows how long, waits that long and then syncs; edits stay on the device meanwhile. The open article's notes are re-checked when you return to the app and every 30 seconds while it's open (skipped for 5 seconds after you type), so notes written on another device appear without reopening the article. Closing a browser can interrupt a network request; the durable queue resumes on the next load. Wait for the sync indicator before switching to another device if possible.
 
 Article opens are state edits: they save `last_opened_at` and move New to Reading. Reading position is locally saved at most once per 750 ms while scrolling, with a trailing save and a flush on navigation/blur/hidden visibility; network writes use the existing debounce. The app restores saved Reading position on reopen.
 

@@ -324,3 +324,81 @@ test('refresh accepts an existing remote queue without treating migration creati
   assert.deepEqual(await store.flush(), { pending: 0 });
   assert.deepEqual(server.puts, []);
 });
+
+// Sync pacing (27 Nov): commits are capped well under GitHub's 500 an hour, and rate limits pause syncing.
+test('a paced sync sends each file once; edits made during its PUT wait for the next sync', async t => {
+  const { store, server } = await fixture(t, queue(['a']));
+  let scheduled = 0;
+  store._schedule = () => { scheduled++; };
+  await store.saveQueue({ queue: ['a', 'first'] });
+  const started = deferred();
+  const release = deferred();
+  server.beforePut = async () => { server.beforePut = null; started.resolve(); await release.promise; };
+  const flushing = store.flush({ drain: false });
+  await started.promise;
+  await store.saveQueue({ queue: ['a', 'first', 'second'] });
+  scheduled = 0;
+  release.resolve();
+  assert.deepEqual(await flushing, { pending: 1 });
+  assert.equal(server.puts.length, 1);
+  assert.equal(scheduled, 1, 'the leftover edit is handed to the paced timer');
+  assert.deepEqual(await store.flush(), { pending: 0 });
+  assert.deepEqual(server.content.queue, ['a', 'first', 'second']);
+});
+
+test('paced sync waits 2 s after an edit, 10 s after a commit, and out any GitHub rate limit', async t => {
+  const { store } = await fixture(t);
+  const delays = [];
+  const original = globalThis.setTimeout;
+  const schedule = () => {
+    globalThis.setTimeout = (callback, ms) => { delays.push(ms); return 0; };
+    try { ReadingStore.prototype._schedule.call(store); } finally { globalThis.setTimeout = original; }
+  };
+  store._lastCommitAt = 0; store._retryAt = 0; schedule();
+  store._lastCommitAt = Date.now(); schedule();
+  store._lastCommitAt = 0; store._retryAt = Date.now() + 120000; schedule();
+  assert.equal(delays[0], 2000);
+  assert.ok(delays[1] > 9000 && delays[1] <= 10000, `got ${delays[1]}`);
+  assert.ok(delays[2] > 119000 && delays[2] <= 120000, `got ${delays[2]}`);
+});
+
+test('GitHub rate limits pause syncing with a clear message; a plain 403 still reads as access denied', async t => {
+  const { store, server } = await fixture(t);
+  delete store._request;
+  const responses = [];
+  replaceGlobal(t, 'fetch', async () => responses.shift());
+  const limited = '{"message":"You have exceeded a secondary rate limit."}';
+  responses.push(new Response(limited, { status: 403, headers: { 'retry-after': '120' } }));
+  await assert.rejects(store._request('https://api.github.com/fictional'),
+    error => error.retryAfter === 120000 && /slow down/.test(error.message) && /2 min/.test(error.message));
+  assert.equal(store.rateLimited, true);
+  await store.saveQueue({ queue: ['a', 'waiting'] });
+  assert.deepEqual(await store.flush(), { pending: 1 }, 'no request is made while GitHub asks the app to wait');
+  assert.equal(server.puts.length, 0);
+  store._retryAt = 0;
+  responses.push(new Response(limited, { status: 403 }));
+  await assert.rejects(store._request('https://api.github.com/fictional'), error => error.retryAfter === 60000);
+  store._retryAt = 0;
+  responses.push(new Response('{"message":"Resource not accessible by personal access token"}', { status: 403 }));
+  await assert.rejects(store._request('https://api.github.com/fictional'),
+    error => !error.retryAfter && /access denied/.test(error.message));
+  assert.equal(store.rateLimited, false);
+});
+
+test('refreshNotes picks up notes from another device, and skips while GitHub asks the app to wait', async t => {
+  const { store } = await fixture(t);
+  const remote = { long_notes: 'Written on the phone.', highlights: [], links: [], hidden_links: [], updated_at: '2026-11-27T10:00:00.000Z' };
+  let fetches = 0;
+  store._fetchRemote = async target => {
+    fetches++;
+    assert.equal(target, 'user/notes/fictional-article.json');
+    return { content: copy(remote), sha: 'notes-1' };
+  };
+  const events = [];
+  store.addEventListener('notes-updated', event => events.push(event.detail));
+  assert.equal(await store.refreshNotes('fictional-article'), true);
+  assert.deepEqual(events.map(event => [event.slug, event.notes.long_notes]), [['fictional-article', 'Written on the phone.']]);
+  store._retryAt = Date.now() + 60000;
+  assert.equal(await store.refreshNotes('fictional-article'), false);
+  assert.equal(fetches, 1);
+});

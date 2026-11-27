@@ -14,7 +14,7 @@ function lookup(collection, key) {
   return collection instanceof Map ? collection.get(key) : collection?.[key];
 }
 
-function noteCount(item) {
+export function noteCount(item) {
   const notes = item.notes || {};
   return Number(Boolean(String(notes.long_notes || '').trim())) + (notes.highlights || []).reduce((count, highlight) => (
     count + Number(!highlight.deleted && !notes.deleted_highlights?.[highlight.id] && Boolean(String(highlight.note || '').trim()))

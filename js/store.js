@@ -9,6 +9,21 @@ const EPOCH = '1970-01-01T00:00:00.000Z';
 const STATE_FIELDS = ['progress', 'position', 'starred', 'triaged_at', 'progress_changed_at', 'last_opened_at'];
 const PROGRESS = new Set(['new', 'reading', 'finished', 'let_go']);
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+// GitHub allows 500 commits an hour. Commit after a 2 s pause, but at most once every 10 s (360 an hour).
+const COMMIT_PAUSE_MS = 2000;
+const COMMIT_GAP_MS = 10000;
+const RATE_LIMIT_WAIT_MS = 60000;
+
+/** How long GitHub asked us to wait, in ms, or 0 when a 403 is not a rate limit. The body is searched, never shown. */
+function rateLimitWait(response, body, now = Date.now()) {
+  const seconds = Number(response.headers.get('retry-after'));
+  if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
+  if (response.headers.get('x-ratelimit-remaining') === '0') {
+    const reset = Number(response.headers.get('x-ratelimit-reset')) * 1000;
+    return Math.max(RATE_LIMIT_WAIT_MS, Number.isFinite(reset) ? reset - now : 0);
+  }
+  return response.status === 429 || /rate limit/i.test(body) ? RATE_LIMIT_WAIT_MS : 0;
+}
 const clone = value => value === undefined ? undefined : structuredClone(value);
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const stamp = value => Number.isFinite(Date.parse(value)) ? Date.parse(value) : 0;
@@ -423,6 +438,9 @@ export class ReadingStore extends EventTarget {
     this._initPromise = null;
     this._flushPromise = null;
     this._timer = null;
+    this._drain = false;
+    this._lastCommitAt = 0;
+    this._retryAt = 0;
     this._disposed = false;
     this._locking = false;
     this._lockPromise = null;
@@ -576,8 +594,14 @@ export class ReadingStore extends EventTarget {
   _schedule() {
     if (this._disposed || this._locking || !this._initialized) return;
     clearTimeout(this._timer);
-    this._timer = setTimeout(() => { this._timer = null; void this.flush(); }, 2000);
+    // Leaving the app flushes at once; this paced sync covers edits while you stay.
+    const now = Date.now();
+    const wait = Math.max(COMMIT_PAUSE_MS, this._lastCommitAt + COMMIT_GAP_MS - now, this._retryAt - now);
+    this._timer = setTimeout(() => { this._timer = null; void this.flush({ drain: false }); }, wait);
   }
+
+  /** True while GitHub has asked the app to wait before calling it again. */
+  get rateLimited() { return Date.now() < this._retryAt; }
 
   _queueEdit(path, content, options = {}) {
     this._assertOpen();
@@ -679,13 +703,19 @@ export class ReadingStore extends EventTarget {
       if (!response.ok) {
         // Remote error text is untrusted and can echo request credentials.
         let message = `GitHub returned ${response.status}. Your local edits remain queued.`;
+        let retryAfter = 0;
         if (response.status === 401) message = 'GitHub rejected the token. Update it in Settings; queued notes are retained.';
-        if (response.status === 403 || response.status === 429) message = response.headers.get('x-ratelimit-remaining') === '0' || response.status === 429
-          ? 'GitHub rate limit reached. Wait before syncing again; queued notes are retained.'
-          : 'GitHub access denied. Check the token’s repository access and Contents read/write permission.';
+        if (response.status === 403 || response.status === 429) {
+          retryAfter = rateLimitWait(response, await response.text().catch(() => ''));
+          if (retryAfter) {
+            this._retryAt = Math.max(this._retryAt, Date.now() + retryAfter);
+            message = `GitHub asked the app to slow down. Your notes are saved on this device and will sync in about ${Math.max(1, Math.ceil(retryAfter / 60000))} min.`;
+          } else message = 'GitHub access denied. Check the token’s repository access and Contents read/write permission.';
+        }
         if (response.status === 404) message = 'GitHub could not find this repository, branch, or file. Check Settings and token access.';
         const error = new Error(message);
         error.status = response.status;
+        if (retryAfter) error.retryAfter = retryAfter;
         throw error;
       }
       const result = await response[kind]();
@@ -823,6 +853,13 @@ export class ReadingStore extends EventTarget {
 
   getArticle(slug) { return this._get(`articles/${safeSlug(slug)}.md`); }
   getNotes(slug) { return this._get(`user/notes/${safeSlug(slug)}.json`, emptyNotes()); }
+
+  /** Check GitHub for a newer copy of one article's notes; a change arrives as 'notes-updated'. */
+  async refreshNotes(slug) {
+    if (this.demo || this._disposed || !this._initialized || this.rateLimited || globalThis.navigator?.onLine === false) return false;
+    try { await this._refresh(`user/notes/${safeSlug(slug)}.json`, emptyNotes()); return true; }
+    catch { return false; } // A missed background check is retried on the next one.
+  }
   getSummary(slug) { return this._get(`bot/summaries/${safeSlug(slug)}.md`, ''); }
   async getEdition(date = localDate(), { refresh = false } = {}) {
     this._assertOpen();
@@ -962,7 +999,7 @@ export class ReadingStore extends EventTarget {
       sent = this._mergePending(snapshot, remote.content);
       if (path === 'user/queue.json' && snapshot.createOnly !== false && remote.content) { sha = remote.sha; break; }
       if (equal(sent, remote.content)) { sha = remote.sha; break; }
-      try { sha = await this._putRemote(path, sent, remote.sha); break; }
+      try { sha = await this._putRemote(path, sent, remote.sha); this._lastCommitAt = Date.now(); break; }
       catch (error) {
         if (![409, 422].includes(error.status)) throw error;
         if (attempt === 3) throw new Error('GitHub still reports a conflicting update. Your edits remain queued; try syncing again shortly.');
@@ -984,7 +1021,11 @@ export class ReadingStore extends EventTarget {
     await this._persist(path);
   }
 
-  async flush() {
+  /**
+   * Send queued edits to GitHub. A drain (leaving the app, coming online) sends everything, including
+   * edits made while it runs. The paced sync sends each file once; later edits wait for the next one.
+   */
+  async flush({ drain = true } = {}) {
     if (this._disposed) return { pending: 0 };
     // Never flush legacy recovery entries before init has backed up and migrated them.
     if (!this._initialized) {
@@ -993,7 +1034,12 @@ export class ReadingStore extends EventTarget {
     }
     clearTimeout(this._timer);
     this._timer = null;
-    if (this._flushPromise) return this._flushPromise;
+    if (this._flushPromise) {
+      if (drain) this._drain = true;
+      return this._flushPromise;
+    }
+    if (!this.demo && this.rateLimited) { this._schedule(); return { pending: this._queue.size }; }
+    this._drain = drain;
     this._flushPromise = (async () => {
       await this._ensureReady();
       if (this._disposed) return { pending: 0 };
@@ -1005,19 +1051,29 @@ export class ReadingStore extends EventTarget {
       this._emit('sync', this.demo ? 'Saving demo locally…' : 'Syncing with your private repository…');
       try {
         if (this.demo && !this._db) throw new Error('IndexedDB is unavailable. Demo edits remain in the recovery journal; enable browser storage for normal offline saving.');
+        const sent = new Set();
         while (this._queue.size) {
-          const snapshot = clone(this._queue.values().next().value);
+          const next = [...this._queue.values()].find(entry => this._drain || !sent.has(entry.path));
+          if (!next) break;
+          const snapshot = clone(next);
+          sent.add(snapshot.path);
           if (this.demo) {
             this._queue.delete(snapshot.path);
             await this._persist(snapshot.path);
           } else await this._push(snapshot);
         }
         this._lastError = null;
-        this._emit(this.demo ? 'local' : 'synced', this.demo ? 'Saved on this device · demo.' : 'All changes synced to your private repository.');
-      } catch (error) { this._error(error); }
+        if (this._queue.size) {
+          this._emit('queued', 'Saved locally; the next sync follows shortly.');
+          this._schedule();
+        } else this._emit(this.demo ? 'local' : 'synced', this.demo ? 'Saved on this device · demo.' : 'All changes synced to your private repository.');
+      } catch (error) {
+        this._error(error);
+        if (error.retryAfter) this._schedule();
+      }
       return { pending: this._queue.size };
     })();
-    try { return await this._flushPromise; } finally { this._flushPromise = null; }
+    try { return await this._flushPromise; } finally { this._flushPromise = null; this._drain = false; }
   }
 
   async testConnection() {

@@ -1,5 +1,5 @@
 import { ReadingStore, getSettings, saveSettings } from './store.js';
-import { Library, tagLabel } from './library.js';
+import { Library, noteCount, tagLabel } from './library.js';
 import { NotesPane } from './notes.js';
 import { Reader } from './reader.js';
 import { VaultAccess } from './auth.js';
@@ -177,11 +177,18 @@ function updateReaderButtons() {
   $('#reader-star').setAttribute('aria-pressed', String(Boolean(item.starred)));
   $('#reader-star').setAttribute('aria-label', `${item.starred ? 'Remove' : 'Add'} Keeper — worth coming back to`);
 }
+let libraryTimer = 0, lastNoteEditAt = 0;
 function saveNotes() {
+  lastNoteEditAt = Date.now();
+  const countBefore = noteCount({ notes: notesCache.get(active.slug) });
   notes.updated_at = now(); notesCache.set(active.slug, structuredClone(notes));
   persist(store.saveNotes(active.slug, notes));
   botBox.render(bot, notes);
-  renderLibrary();
+  // Redrawing all ~1,500 library rows took most of each keystroke. A note edit only changes
+  // what the library shows when the row's ✎ count changes, or the order under "With notes".
+  clearTimeout(libraryTimer);
+  if (noteCount({ notes }) !== countBefore) renderLibrary();
+  else if (withNotes) libraryTimer = setTimeout(renderLibrary, 800);
 }
 function deleteHighlight(highlight) {
   if (!active) return;
@@ -728,7 +735,16 @@ window.addEventListener('hashchange', restoreArticle);
 window.addEventListener('blur', () => { flushPosition(); if (store) persist(store.flush()); });
 document.addEventListener('visibilitychange', () => {
   if (document.hidden && store) { flushPosition(); persist(store.flush()); }
+  else refreshOpenNotes();
 });
+// Pick up notes written on another device: on returning to the app, and every 30 s while it's open.
+// Skipped for 5 s after you type here, so text never shifts under your cursor.
+function refreshOpenNotes() {
+  if (!store || !active || !articleReady || document.hidden || Date.now() - lastNoteEditAt < 5000) return;
+  void store.refreshNotes(active.slug);
+}
+window.addEventListener('focus', refreshOpenNotes);
+setInterval(refreshOpenNotes, 30000);
 window.addEventListener('online', () => { if (store) persist(store.flush()); });
 closeDrawers(); void access.start();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { /* The app still works when service workers are disabled. */ });

@@ -380,6 +380,14 @@ export class Reader {
     const cursor = start + editor.selectionStart;
     h.note = h.note.slice(0, start) + editor.value + h.note.slice(end);
     h.updated_at = new Date().toISOString(); this.changed();
+    // Typing on a note's last line that still fits: the rebuilt rows would be identical, so keep this editor.
+    this.measure.font = 'italic 13px Georgia';
+    const available = parseFloat(editor.parentElement?.style.width) - 8;
+    if (editor.value && !editor.value.includes('\n') && start + editor.value.length === h.note.length
+      && this.measure.measureText(editor.value).width <= available) {
+      editor.dataset.end = String(h.note.length);
+      return;
+    }
     this.renderNotes({ id: h.id, offset: cursor });
   }
   editorKey(e) {
