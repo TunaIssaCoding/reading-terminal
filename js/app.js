@@ -5,7 +5,7 @@ import { Reader } from './reader.js';
 import { VaultAccess } from './auth.js';
 import { BotBox } from './bot.js';
 import { createAutoFinish } from './progress.js';
-import { effectiveState, libraryFields, pickUnread } from './model.js';
+import { COLLECTIONS, collectionOf, effectiveState, libraryFields, pickUnread } from './model.js';
 import { connectionDecision, undoConnection } from './connections.js';
 import { ImageViewer } from './lightbox.js';
 
@@ -109,12 +109,42 @@ function items() {
   return libraryItems.map(item => ({ ...libraryFields(item), ...state[item.id],
     ...effectiveState(item, state[item.id]), notes: notesCache.get(item.slug) }));
 }
+// Library, Papers, Books & textbooks: the list, search, filters and Feeling lucky all work inside one collection.
+const COLLECTION_KEY = 'reading-collection';
+const EMPTY_COLLECTION = {
+  library: 'Nothing here yet. Your bot adds what you bookmark.',
+  papers: 'No papers yet. When your bot adds one, it appears here.',
+  books: 'No books or textbooks yet. When your bot adds one, it appears here.',
+};
+let collection = (() => {
+  try { const saved = localStorage.getItem(COLLECTION_KEY); return Object.hasOwn(COLLECTIONS, saved || '') ? saved : 'library'; }
+  catch { return 'library'; }
+})();
+function collectionItems(all = items()) { return all.filter(item => collectionOf(item) === collection); }
+function fillSources() {
+  const labels = [...new Set(collectionItems().map(item => item.source_label).filter(Boolean))].sort();
+  $('#source-filter').replaceChildren(new Option('All sources', ''), ...labels.map(label => new Option(label, label)));
+  if (!labels.includes(sourceFilter)) sourceFilter = '';
+  $('#source-filter').value = sourceFilter;
+}
+function setCollection(next, render = true) {
+  collection = next;
+  try { localStorage.setItem(COLLECTION_KEY, next); } catch { /* Remembering the tab is a convenience. */ }
+  for (const button of document.querySelectorAll('[data-collection]')) {
+    button.setAttribute('aria-pressed', String(button.dataset.collection === next));
+    button.title = button.dataset.collection === next ? 'Click again to hide or show the list' : `Show ${COLLECTIONS[button.dataset.collection]}`;
+  }
+  fillSources();
+  if (render) renderLibrary();
+}
 function renderLibrary() {
-  const projected = items();
+  const projected = collectionItems();
   $('#lucky-button').disabled = !projected.some(item => item.progress === 'new');
   library.render(projected, { activeId: active?.id, query, tag, starredOnly, progress: progressFilter,
-    withNotes, shortOnly, source: sourceFilter, bodies: new Map([...searchIndex, ...bodies]) });
-  $('#library-total').textContent = `${libraryItems.length} items`;
+    withNotes, shortOnly, source: sourceFilter, bodies: new Map([...searchIndex, ...bodies]),
+    ...(projected.length ? {} : { empty: EMPTY_COLLECTION[collection] }) });
+  $('#library-heading').textContent = collection === 'library' ? 'YOUR LIBRARY' : COLLECTIONS[collection].toUpperCase();
+  $('#library-total').textContent = `${projected.length} ${projected.length === 1 ? 'item' : 'items'}`;
   $('#tag-filter').hidden = !tag; $('#tag-filter').textContent = `${tag} ×`;
   $('#star-filter').setAttribute('aria-pressed', String(starredOnly));
   $('#notes-filter').setAttribute('aria-pressed', String(withNotes));
@@ -284,6 +314,8 @@ function articleSlug() {
 async function openArticle(id, navigation = 'push', openingTime = null) {
   const item = currentItem(id) || items().find(item => item.slug === id);
   if (!item) { notify('That article is not in this library.'); return; }
+  // Keep the open article visible in the list: show the collection it belongs to.
+  if (collectionOf(item) !== collection) setCollection(collectionOf(item), false);
   if (navigation !== 'preview') {
     const timestamp = openingTime || now();
     state[item.id] = { ...state[item.id], last_opened_at: timestamp };
@@ -387,12 +419,7 @@ async function connect(settings = getSettings()) {
     const initial = await store.init();
     if (version !== connectionVersion) return;
     libraryItems = initial.library; state = initial.state || {};
-    const sourceSelect = $('#source-filter');
-    sourceSelect.replaceChildren(new Option('All sources', ''));
-    for (const label of [...new Set(libraryItems.map(item => libraryFields(item).source_label).filter(Boolean))].sort()) {
-      sourceSelect.add(new Option(label, label));
-    }
-    sourceSelect.value = sourceFilter;
+    fillSources();
     renderLibrary();
     const slug = articleSlug();
     // With no article in the link, reopen the one you were last reading.
@@ -477,9 +504,9 @@ $('#progress-filter').addEventListener('change', e => { progressFilter = e.targe
 $('#source-filter').addEventListener('change', e => { sourceFilter = e.target.value; renderLibrary(); });
 $('#tag-filter').addEventListener('click', () => { tag = ''; renderLibrary(); });
 $('#lucky-button').addEventListener('click', () => {
-  const pick = pickUnread(items(), active?.id);
+  const pick = pickUnread(collectionItems(), active?.id);
   if (pick) void openArticle(pick.id);
-  else notify('Nothing unread left.');
+  else notify(`Nothing unread left in ${COLLECTIONS[collection]}.`);
 });
 $('#read-toggle').addEventListener('click', toggleRead);
 $('#reader-star').addEventListener('click', () => toggleStar());
@@ -549,9 +576,19 @@ function arrangeTopbar() {
   const destination = mobile() ? $('#mobile-extras') : $('.topbar');
   for (const id of ['mode-badge', 'sync-status', 'lock-button']) {
     if (mobile()) destination.append($('#' + id));
-    else destination.insertBefore($('#' + id), id === 'mode-badge' ? $('.topbar-spacer') : $('.topbar-more'));
+    else destination.insertBefore($('#' + id), id === 'mode-badge' ? $('.topbar .collection-tabs') : $('.topbar-more'));
   }
 }
+for (const button of document.querySelectorAll('[data-collection]')) {
+  button.addEventListener('click', () => {
+    const next = button.dataset.collection;
+    // On a desktop the current tab works like the old Library button: it hides or shows the list.
+    if (!mobile() && next === collection) { document.body.classList.toggle('sidebar-collapsed'); closeDrawers(); return; }
+    setCollection(next);
+    if (!mobile()) { document.body.classList.remove('sidebar-collapsed'); closeDrawers(); }
+  });
+}
+setCollection(collection, false);
 function showDrawer(which) {
   if (!mobile()) return;
   document.body.classList.toggle('library-open', which === 'library');

@@ -254,3 +254,15 @@ test('feeling lucky picks only unread articles and never the open one', () => {
   assert.equal(pickUnread([{ id: 'b', progress: 'finished' }, { id: 'd', progress: 'reading' }]), null);
   assert.equal(pickUnread([{ id: 'a', progress: 'new' }], 'a'), null);
 });
+
+test('collections: a collection field wins, papers and books come from source_type, everything else is Library', async () => {
+  const { collectionOf } = await import('../js/model.js');
+  assert.equal(collectionOf({ source_type: 'tweet' }), 'library');
+  assert.equal(collectionOf({ source_type: 'substack' }), 'library');
+  assert.equal(collectionOf({ source_type: 'Paper' }), 'papers');
+  assert.equal(collectionOf({ source_type: 'book' }), 'books');
+  assert.equal(collectionOf({ source_type: 'textbook' }), 'books');
+  assert.equal(collectionOf({ source_type: 'essay', collection: 'papers' }), 'papers');
+  assert.equal(collectionOf({ source_type: 'paper', collection: 'nonsense' }), 'papers');
+  assert.equal(collectionOf({}), 'library');
+});

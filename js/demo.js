@@ -280,6 +280,40 @@ for (let index = 1; index <= 2; index++) {
     triaged_at: '2025-12-03T09:00:00.000Z', progress_changed_at: '2025-12-03T09:00:00.000Z',
     last_opened_at: index === 1 ? '2026-01-03T09:00:00.000Z' : null };
 }
+// Fictional records for the Papers and Books & textbooks collections.
+demoLibrary.push({
+  id: 'demo-paper-01', slug: 'margins-as-memory-a-field-study', title: 'Margins as Memory: A Field Study of Annotated Notebooks',
+  author: 'Rue Fen and Tavi Moss · fictional', source_type: 'paper', source: 'papers', source_label: 'Paper',
+  created_at: '2026-05-02T09:00:00.000Z', added_at: '2026-06-26T09:00:00.000Z', words: 1150, read_minutes: 5,
+  tags: ['Observation', 'Research'], images: [],
+  summary: 'A fictional study finds that readers who write questions beside a passage recall why it mattered more often.',
+});
+demoArticles['margins-as-memory-a-field-study'] = `## Abstract
+
+This fictional study followed forty readers of an invented field journal for twelve weeks. Readers who wrote a question beside a passage recalled their reason for saving it far more often than readers who only highlighted.
+
+## Method
+
+Each reader kept one notebook. Half wrote questions in the margin; half underlined. After twelve weeks, both groups were shown the passages again.
+
+## Result
+
+The margin group named a reason for most passages. The underline group named a reason for few. The authors suggest that a question is a handle for returning to an idea.`;
+demoLibrary.push({
+  id: 'demo-textbook-01', slug: 'patient-observation-an-introduction', title: 'Patient Observation: An Introduction',
+  author: 'Wren Ash · fictional', source_type: 'textbook', source: 'books', source_label: 'Textbook',
+  created_at: '2025-09-01T09:00:00.000Z', added_at: '2026-06-27T09:00:00.000Z', words: 1400, read_minutes: 6,
+  tags: ['Observation', 'Method'], images: [],
+  summary: 'An invented introductory textbook on recording what you see before deciding what it means.',
+});
+demoArticles['patient-observation-an-introduction'] = `## Chapter 1: Before the explanation
+
+An observation is a record of what happened, written before you decide why it happened. This fictional textbook begins with a single rule: write the measurement and the doubt on the same page.
+
+## Chapter 2: Keeping the rejected idea
+
+When you change your mind, keep the first explanation with a line through it. The next reader learns as much from the crossed-out idea as from the one that survived.`;
+
 export const demoQueue = {
   queue: ['demo-queued-01', 'demo-queued-02', 'demo-queued-03'],
   arrivals_since: '2026-06-01T00:00:00.000Z',

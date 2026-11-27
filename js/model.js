@@ -4,6 +4,17 @@ const LEGACY_FIELDS = new Set(['status', 'status_changed_at', 'status_updated_at
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const safeKey = key => !['__proto__', 'constructor', 'prototype'].includes(key);
 
+/** The top-bar collections. A record's `collection` field wins; otherwise its source_type decides. */
+export const COLLECTIONS = Object.freeze({ library: 'Library', papers: 'Papers', books: 'Books & textbooks' });
+export function collectionOf(record = {}) {
+  const named = String(record.collection || '').toLowerCase();
+  if (Object.hasOwn(COLLECTIONS, named)) return named;
+  const type = String(record.source_type || '').toLowerCase();
+  if (type === 'paper') return 'papers';
+  if (type === 'book' || type === 'textbook') return 'books';
+  return 'library';
+}
+
 /** Bot metadata stays read-only; missing summaries are supplied by the reader's lede. */
 export function libraryFields(record) {
   const fields = { ...record };

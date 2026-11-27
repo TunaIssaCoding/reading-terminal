@@ -85,7 +85,7 @@ export class Library {
     }
   }
 
-  render(items, { activeId, query = '', tag = '', starredOnly = false, progress = '', withNotes = false, shortOnly = false, source = '', bodies = {} } = {}) {
+  render(items, { activeId, query = '', tag = '', starredOnly = false, progress = '', withNotes = false, shortOnly = false, source = '', bodies = {}, empty = 'No articles match these filters.' } = {}) {
     const term = String(query).trim().toLocaleLowerCase();
     const groupKeys = withNotes ? ['with-notes'] : PROGRESS;
     const grouped = Object.fromEntries(groupKeys.map(key => [key, []]));
@@ -131,7 +131,7 @@ export class Library {
       fragment.append(group);
       this.groups.push({ node: group, ids: rows.map(item => String(item.id)) });
     }
-    if (!total) fragment.append(element('p', 'empty-state library-empty', 'No articles match these filters.'));
+    if (!total) fragment.append(element('p', 'empty-state library-empty', empty));
     this.root.replaceChildren(fragment);
     const visible = this.visibleIds();
     if (!visible.includes(this.focusedId)) this.focusedId = visible.includes(String(activeId)) ? String(activeId) : visible[0] ?? null;
